@@ -1,0 +1,48 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checker / linter caches
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
+
+# Slurm outputs
+slurm-*.out
+slurm-*.err
+*.sbatch.out
+*.sbatch.err
+
+run.sbatch
