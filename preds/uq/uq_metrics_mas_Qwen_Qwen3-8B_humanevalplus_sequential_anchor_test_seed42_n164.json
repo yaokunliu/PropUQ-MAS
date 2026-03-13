@@ -1,0 +1,80 @@
+{
+  "metrics": {
+    "Uncertainty-Final": {
+      "n_with_uncertainty": 164,
+      "auroc": 0.7222222222222222,
+      "ece": 0.12652439024390244,
+      "brier": 0.09336890243902439
+    },
+    "Uncertainty-Mean": {
+      "n_with_uncertainty": 164,
+      "auroc": 0.8202054794520548,
+      "ece": 0.11394817073170734,
+      "brier": 0.09190538194444445
+    },
+    "Uncertainty-Max": {
+      "n_with_uncertainty": 164,
+      "auroc": 0.7753044140030442,
+      "ece": 0.24847560975609753,
+      "brier": 0.14900914634146342
+    },
+    "Formula-Uncertainty-Final": {
+      "n_with_uncertainty": 164,
+      "auroc": 0.7785388127853882,
+      "ece": 0.36420943097370434,
+      "brier": 0.22136010465825476
+    },
+    "Formula-Uncertainty-Mean": {
+      "n_with_uncertainty": 164,
+      "auroc": 0.8091704718417048,
+      "ece": 0.30496370889307034,
+      "brier": 0.17238988025558147
+    },
+    "Formula-Uncertainty-Max": {
+      "n_with_uncertainty": 164,
+      "auroc": 0.816400304414003,
+      "ece": 0.38393569574123476,
+      "brier": 0.2367582602835283
+    },
+    "Hazard-h-Final": {
+      "n_with_uncertainty": 162,
+      "auroc": 0.7663286004056795,
+      "ece": 0.36681300033757724,
+      "brier": 0.22187154362966985
+    },
+    "Hazard-h-Mean": {
+      "n_with_uncertainty": 164,
+      "auroc": 0.8091704718417048,
+      "ece": 0.30496370889307034,
+      "brier": 0.17238988025558147
+    },
+    "Hazard-h-Max": {
+      "n_with_uncertainty": 164,
+      "auroc": 0.816400304414003,
+      "ece": 0.38393569574123476,
+      "brier": 0.2367582602835283
+    },
+    "System-Uncertainty-Final": {
+      "n_with_uncertainty": 164,
+      "auroc": 0.8078386605783866,
+      "ece": 0.3040424669857801,
+      "brier": 0.17875127349574432
+    }
+  },
+  "metadata": {
+    "method": "mas",
+    "model": "Qwen/Qwen3-8B",
+    "split": "test",
+    "seed": 42,
+    "max_samples": 164,
+    "task": "humanevalplus",
+    "prompt": "sequential",
+    "uncertainty_mode": "anchor",
+    "accuracy": 0.8902439024390244,
+    "correct": 146,
+    "total_time_sec": 0.1162,
+    "time_per_sample_sec": 0.0007,
+    "raw_preds_path": "/u/yliu105/MAS_UQ/preds/raw/raw_preds_mas_Qwen_Qwen3-8B_humanevalplus_sequential_anchor_test_seed42_n-1.jsonl",
+    "generated_this_run": false
+  }
+}

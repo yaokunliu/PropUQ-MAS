@@ -38,6 +38,10 @@ htmlcov/
 
 # Logs
 *.log
+log/
+logs_bak/
+test/
+data/
 
 # Slurm outputs
 slurm-*.out

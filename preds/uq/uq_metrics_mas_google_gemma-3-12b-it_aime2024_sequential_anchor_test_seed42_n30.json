@@ -1,0 +1,80 @@
+{
+  "metrics": {
+    "Uncertainty-Final": {
+      "n_with_uncertainty": 30,
+      "auroc": 0.52,
+      "ece": 0.3916666666666666,
+      "brier": 0.32708333333333334
+    },
+    "Uncertainty-Mean": {
+      "n_with_uncertainty": 30,
+      "auroc": 0.568,
+      "ece": 0.35000000000000003,
+      "brier": 0.2648726851851852
+    },
+    "Uncertainty-Max": {
+      "n_with_uncertainty": 30,
+      "auroc": 0.58,
+      "ece": 0.3,
+      "brier": 0.225
+    },
+    "Formula-Uncertainty-Final": {
+      "n_with_uncertainty": 30,
+      "auroc": 0.5,
+      "ece": 0.16221516927083332,
+      "brier": 0.18217779199282327
+    },
+    "Formula-Uncertainty-Mean": {
+      "n_with_uncertainty": 30,
+      "auroc": 0.548,
+      "ece": 0.22514173719618052,
+      "brier": 0.19595687881939938
+    },
+    "Formula-Uncertainty-Max": {
+      "n_with_uncertainty": 30,
+      "auroc": 0.52,
+      "ece": 0.17021484375,
+      "brier": 0.17148021062215169
+    },
+    "Hazard-h-Final": {
+      "n_with_uncertainty": 24,
+      "auroc": 0.5875,
+      "ece": 0.139617919921875,
+      "brier": 0.1673279528816541
+    },
+    "Hazard-h-Mean": {
+      "n_with_uncertainty": 30,
+      "auroc": 0.548,
+      "ece": 0.22514173719618052,
+      "brier": 0.19595687881939938
+    },
+    "Hazard-h-Max": {
+      "n_with_uncertainty": 30,
+      "auroc": 0.52,
+      "ece": 0.17021484375,
+      "brier": 0.17148021062215169
+    },
+    "System-Uncertainty-Final": {
+      "n_with_uncertainty": 30,
+      "auroc": 0.548,
+      "ece": 0.21378049474111827,
+      "brier": 0.19150580413100043
+    }
+  },
+  "metadata": {
+    "method": "mas",
+    "model": "google/gemma-3-12b-it",
+    "split": "test",
+    "seed": 42,
+    "max_samples": 30,
+    "task": "aime2024",
+    "prompt": "sequential",
+    "uncertainty_mode": "anchor",
+    "accuracy": 0.16666666666666666,
+    "correct": 5,
+    "total_time_sec": 0.0219,
+    "time_per_sample_sec": 0.0007,
+    "raw_preds_path": "/u/yliu105/MAS_UQ/preds/raw/raw_preds_mas_google_gemma-3-12b-it_aime2024_sequential_anchor_test_seed42_n-1.jsonl",
+    "generated_this_run": false
+  }
+}

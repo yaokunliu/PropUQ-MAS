@@ -15,6 +15,24 @@ def _ensure_pad_token(tokenizer: AutoTokenizer) -> None:
             tokenizer.pad_token = tokenizer.eos_token
         else:
             tokenizer.add_special_tokens({"pad_token": "<pad>"})
+    # Decoder-only models should use left padding for batched generation.
+    tokenizer.padding_side = "left"
+
+
+def _load_tokenizer(model_name: str):
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+    except ValueError as exc:
+        msg = str(exc)
+        if "Tokenizer class" not in msg:
+            raise
+        print(
+            f"[Tokenizer] Fast tokenizer load failed for {model_name} ({exc}); "
+            "retrying with use_fast=False."
+        )
+        tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+    _ensure_pad_token(tokenizer)
+    return tokenizer
 
 
 def _past_length(past_key_values: Optional[Tuple]) -> int:
@@ -31,6 +49,7 @@ class ModelWrapper:
         self.use_vllm = use_vllm and _HAS_VLLM
         self.vllm_engine = None
         self.args = args
+        self.seed = int(getattr(args, "seed", 42)) if args is not None else 42
 
         if self.use_vllm:
             tp_size = max(1, int(getattr(args, "tensor_parallel_size", 1)))
@@ -40,13 +59,12 @@ class ModelWrapper:
                 model=model_name,
                 tensor_parallel_size=tp_size,
                 gpu_memory_utilization=gpu_util,
+                seed=self.seed,
             )
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-            _ensure_pad_token(self.tokenizer)
+            self.tokenizer = _load_tokenizer(model_name)
             return
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-        _ensure_pad_token(self.tokenizer)
+        self.tokenizer = _load_tokenizer(model_name)
         with torch.no_grad():
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,
@@ -118,6 +136,7 @@ class ModelWrapper:
         max_new_tokens: int = 256,
         temperature: float = 0.7,
         top_p: float = 0.95,
+        repetition_penalty: float = 1.05,
     ) -> List[str]:
         if not self.vllm_engine:
             raise RuntimeError("vLLM engine not initialized. Pass use_vllm=True to ModelWrapper.")
@@ -125,6 +144,8 @@ class ModelWrapper:
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_new_tokens,
+            repetition_penalty=repetition_penalty,
+            seed=self.seed,
         )
         outputs = self.vllm_engine.generate(prompts, sampling_params)
         generations = [out.outputs[0].text.strip() for out in outputs]
@@ -139,13 +160,17 @@ class ModelWrapper:
         max_new_tokens: int = 256,
         temperature: float = 0.7,
         top_p: float = 0.95,
+        repetition_penalty: float = 1.05,
         past_key_values: Optional[Tuple] = None,
     ) -> Tuple[List[str], Optional[Tuple]]:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, device=self.device)
-        prompt_lengths = attention_mask.sum(dim=1).tolist()
+        # For left-padded batches, generated sequences are prefixed by the full
+        # padded input width (not just non-pad token count). Use input width as
+        # decode boundary to avoid leaking prompt tail into decoded outputs.
+        input_width = input_ids.shape[1]
         cache_position = None
         if past_key_values is not None:
             past_len = _past_length(past_key_values)
@@ -169,7 +194,9 @@ class ModelWrapper:
             temperature=temperature,
             top_p=top_p,
             do_sample=True,
+            repetition_penalty=repetition_penalty,
             pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
             return_dict_in_generate=True,
             output_scores=False,
             past_key_values=past_key_values,
@@ -177,9 +204,8 @@ class ModelWrapper:
         )
         sequences = outputs.sequences
         generations: List[str] = []
-        for idx, length in enumerate(prompt_lengths):
-            length = int(length)
-            generated_ids = sequences[idx, length:]
+        for idx in range(sequences.shape[0]):
+            generated_ids = sequences[idx, input_width:]
             text = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
             generations.append(text)
         return generations, outputs.past_key_values

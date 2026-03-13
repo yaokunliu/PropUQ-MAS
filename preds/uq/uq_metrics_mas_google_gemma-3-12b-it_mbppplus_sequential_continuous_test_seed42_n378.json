@@ -1,0 +1,80 @@
+{
+  "metrics": {
+    "Uncertainty-Final": {
+      "n_with_uncertainty": 378,
+      "auroc": 0.5913704744585881,
+      "ece": 0.24576719576719017,
+      "brier": 0.2655952380952376
+    },
+    "Uncertainty-Mean": {
+      "n_with_uncertainty": 378,
+      "auroc": 0.7530335592659944,
+      "ece": 0.2206679894179893,
+      "brier": 0.24484811324221026
+    },
+    "Uncertainty-Max": {
+      "n_with_uncertainty": 378,
+      "auroc": 0.7080343858489007,
+      "ece": 0.17751322751322635,
+      "brier": 0.22306878306878222
+    },
+    "Formula-Uncertainty-Final": {
+      "n_with_uncertainty": 378,
+      "auroc": 0.7476442387171434,
+      "ece": 0.08515073521825522,
+      "brier": 0.1877990560586752
+    },
+    "Formula-Uncertainty-Mean": {
+      "n_with_uncertainty": 378,
+      "auroc": 0.7422549181682923,
+      "ece": 0.11733697828690048,
+      "brier": 0.2007317752771613
+    },
+    "Formula-Uncertainty-Max": {
+      "n_with_uncertainty": 378,
+      "auroc": 0.7459910729046123,
+      "ece": 0.08331574675512696,
+      "brier": 0.18769517246328374
+    },
+    "Hazard-h-Final": {
+      "n_with_uncertainty": 315,
+      "auroc": 0.7597625588697017,
+      "ece": 0.09028049535714405,
+      "brier": 0.18009012585340495
+    },
+    "Hazard-h-Mean": {
+      "n_with_uncertainty": 378,
+      "auroc": 0.7422549181682923,
+      "ece": 0.11733697828690048,
+      "brier": 0.2007317752771613
+    },
+    "Hazard-h-Max": {
+      "n_with_uncertainty": 378,
+      "auroc": 0.7459910729046123,
+      "ece": 0.08331574675512696,
+      "brier": 0.18769517246328374
+    },
+    "System-Uncertainty-Final": {
+      "n_with_uncertainty": 378,
+      "auroc": 0.7425524880145479,
+      "ece": 0.11530861792857798,
+      "brier": 0.19967843722989212
+    }
+  },
+  "metadata": {
+    "method": "mas",
+    "model": "google/gemma-3-12b-it",
+    "split": "test",
+    "seed": 42,
+    "max_samples": 378,
+    "task": "mbppplus",
+    "prompt": "sequential",
+    "uncertainty_mode": "continuous",
+    "accuracy": 0.6957671957671958,
+    "correct": 263,
+    "total_time_sec": 0.2635,
+    "time_per_sample_sec": 0.0007,
+    "raw_preds_path": "/u/yliu105/MAS_UQ/preds/raw/raw_preds_mas_google_gemma-3-12b-it_mbppplus_sequential_continuous_test_seed42_n-1.jsonl",
+    "generated_this_run": false
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "metrics": {
+    "Uncertainty-Final": {
+      "n_with_uncertainty": 23,
+      "auroc": 0.5,
+      "ece": 0.2391304347826087,
+      "brier": 0.266304347826087
+    },
+    "Uncertainty-Mean": {
+      "n_with_uncertainty": 23,
+      "auroc": 0.25,
+      "ece": 0.2490942028985507,
+      "brier": 0.29436518719806765
+    },
+    "Uncertainty-Max": {
+      "n_with_uncertainty": 23,
+      "auroc": 0.32142857142857145,
+      "ece": 0.18478260869565216,
+      "brier": 0.27445652173913043
+    },
+    "Formula-Uncertainty-Final": {
+      "n_with_uncertainty": 23,
+      "auroc": 0.2857142857142857,
+      "ece": 0.2668138586956522,
+      "brier": 0.28428890394127887
+    },
+    "Formula-Uncertainty-Mean": {
+      "n_with_uncertainty": 23,
+      "auroc": 0.25,
+      "ece": 0.27894658627717395,
+      "brier": 0.29525133751440735
+    },
+    "Formula-Uncertainty-Max": {
+      "n_with_uncertainty": 23,
+      "auroc": 0.2544642857142857,
+      "ece": 0.2820991847826087,
+      "brier": 0.29271440920622455
+    },
+    "Hazard-h-Final": {
+      "n_with_uncertainty": 21,
+      "auroc": 0.35,
+      "ece": 0.22079613095238093,
+      "brier": 0.2518402281261626
+    },
+    "Hazard-h-Mean": {
+      "n_with_uncertainty": 23,
+      "auroc": 0.22767857142857142,
+      "ece": 0.26327558876811596,
+      "brier": 0.289738486930368
+    },
+    "Hazard-h-Max": {
+      "n_with_uncertainty": 23,
+      "auroc": 0.26785714285714285,
+      "ece": 0.2984035326086957,
+      "brier": 0.2889779961627463
+    },
+    "System-Uncertainty-Final": {
+      "n_with_uncertainty": 23,
+      "auroc": 0.22321428571428573,
+      "ece": 0.263648601297899,
+      "brier": 0.28938645364768373
+    }
+  },
+  "metadata": {
+    "method": "mas",
+    "model": "Qwen/Qwen3-8B",
+    "split": "test",
+    "seed": 42,
+    "max_samples": 30,
+    "task": "aime2024",
+    "prompt": "hierarchical",
+    "uncertainty_mode": "anchor",
+    "accuracy": 0.5666666666666667,
+    "correct": 17,
+    "total_time_sec": 0.0183,
+    "time_per_sample_sec": 0.0006,
+    "raw_preds_path": "/u/yliu105/MAS_UQ/preds/raw/raw_preds_mas_Qwen_Qwen3-8B_aime2024_hierarchical_anchor_test_seed42_n-1.jsonl",
+    "generated_this_run": false
+  }
+}

@@ -36,6 +36,68 @@ def extract_gsm8k_answer(text: str) -> Optional[str]:
     return None
 
 
+def extract_last_boxed_content(text: str) -> Optional[str]:
+    marker = "\\boxed{"
+    start = text.rfind(marker)
+    if start == -1:
+        return None
+
+    i = start + len(marker)
+    depth = 1
+    content = []
+    while i < len(text):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+            content.append(ch)
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return "".join(content).strip()
+            content.append(ch)
+        else:
+            content.append(ch)
+        i += 1
+    return None
+
+
+def extract_mcq_choice(text: str, choices: str = "abcd") -> Optional[str]:
+    allowed = {c.lower() for c in choices}
+
+    def _normalize_candidate(src: str) -> str:
+        s = src
+        # Unwrap simple latex text blocks like \text{A. }
+        for _ in range(3):
+            new_s = re.sub(r"\\text\s*\{([^{}]*)\}", r"\1", s)
+            if new_s == s:
+                break
+            s = new_s
+        s = s.replace("~", " ")
+        return s.strip()
+
+    boxed = extract_last_boxed_content(text)
+    if boxed:
+        s = _normalize_candidate(boxed)
+        match = re.search(r"(?i)^\s*[^a-z0-9]*([a-z])(?:\b|[^a-z])", s)
+        if match:
+            letter = match.group(1).lower()
+            if letter in allowed:
+                return letter
+
+    keyword_patterns = [
+        r"(?i)(?:final\s+answer|answer|option|choice)\s*(?:is|:)?\s*\**\s*([a-z])\b",
+        r"(?i)\b([a-z])\s*[\).,:]\s*",
+    ]
+    for pattern in keyword_patterns:
+        matches = re.findall(pattern, text)
+        for m in reversed(matches):
+            letter = m.lower()
+            if letter in allowed:
+                return letter
+
+    return None
+
+
 def extract_gold(text: str) -> Optional[str]:
     match = re.search(r"####\s*([-+]?\d+(?:\.\d+)?)", text)
     return match.group(1) if match else None
@@ -53,6 +115,45 @@ def extract_markdown_python_block(text: str) -> Optional[str]:
     if matches:
         return matches[-1].strip()
     return None
+
+
+def strip_structured_uncertainty_blocks(text: str) -> str:
+    out = re.sub(
+        r"<agent_uncertainty\b[^>]*>.*?</agent_uncertainty>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    out = re.sub(r"<agent_uncertainty\b[^>]*/>", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"<peer_influence\b[^>]*/>", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"<message_uncertainty\b[^>]*/>", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"<message_adoption\b[^>]*/>", "", out, flags=re.IGNORECASE)
+    # Backward compatibility: also strip legacy confidence tags.
+    out = re.sub(r"<agent_confidence\b[^>]*>.*?</agent_confidence>", "", out, flags=re.IGNORECASE | re.DOTALL)
+    out = re.sub(r"<agent_confidence\b[^>]*/>", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"<message_confidence\b[^>]*/>", "", out, flags=re.IGNORECASE)
+
+    # Plain-text fallback formats.
+    out = re.sub(
+        r"(?im)^[ \t>*`-]*(?:agent'?s?\s+uncertainty|self[_\s-]*uncertainty|message\s+adoption)\s*[:=]\s*[^\n\r]*$",
+        "",
+        out,
+    )
+    out = re.sub(
+        r"(?im)^[ \t>*`-]*message[_\s-]*adoption[_\s-]*weight\s*[:=]\s*[^\n\r]*$",
+        "",
+        out,
+    )
+    tag_group = (
+        "evidence_gap|memory_gap|reasoning_gap|ambiguous_task|context_conflict|tool_risk|weak_signal|guess|"
+        "verify|critique|selective_use|balanced_use|follow|execute|refine|low_relevance"
+    )
+    out = re.sub(
+        rf"(?im)^[ \t>*`-]*tag\s*[:=]\s*(?:{tag_group})\s*$",
+        "",
+        out,
+    )
+    return out
 
 
 # to run python
@@ -78,4 +179,3 @@ def run_with_timeout(code, timeout):
             ns['ok'] = False
             ns['error'] = f"TimeoutError: Execution exceeded {timeout} seconds"
         return ns.get('ok', False), ns.get('error', None)
-
