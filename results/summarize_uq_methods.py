@@ -2,40 +2,63 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 
-RESULT_JSON_PATTERN = re.compile(r'^\{"method":.*"accuracy":.*\}$')
-FIELD_PATTERNS = {
-    "model": re.compile(r"^MODEL:\s+(.+)$", re.MULTILINE),
-    "prompt": re.compile(r"^PROMPT:\s+(.+)$", re.MULTILINE),
-    "task": re.compile(r"^TASK:\s+(.+)$", re.MULTILINE),
-    "args": re.compile(r"^ARGS:\s+(.+)$", re.MULTILINE),
+DETAIL_METRIC_ORDER = [
+    "Uncertainty-Final",
+    "Uncertainty-Max",
+    "Uncertainty-Mean",
+    "Formula-Uncertainty-Final",
+    "Formula-Uncertainty-Max",
+    "Formula-Uncertainty-Mean",
+    "Hazard-h-Final",
+    "Hazard-h-Max",
+    "Hazard-h-Mean",
+    "System-Uncertainty-Final",
+]
+
+METRIC_GROUPS = {
+    "mean": ("Mean", ("-Mean", "System-Uncertainty-Final")),
+    "max": ("Max", ("-Max", "System-Uncertainty-Final")),
+    "final": ("Final", ("-Final", "System-Uncertainty-Final")),
 }
 
+FILE_RE = re.compile(
+    r"^uq_metrics_"
+    r"(?P<method>[^_]+)_"
+    r"(?P<task>[^_]+)_"
+    r"(?P<topology>.+?)"
+    r"_nodes(?P<nodes>\d+)"
+    r"(?:_edges(?P<edges>\d+))?"
+    r"_seed(?P<seed>-?\d+)"
+    r"_n(?P<max_samples>-?\d+)"
+    r"(?:_uq(?P<uncertainty_mode_slug>[a-z0-9_]+)|_uq_(?P<uncertainty_mode_slug_alt>[a-z0-9_]+))?"
+    r"(?:_adopt(?P<adoption_mode_slug>[a-z0-9_]+))?"
+    r"\.json$"
+)
+
 
 @dataclass
-class AccuracyRecord:
-    mode: str
+class MetricRecord:
+    method: str
     model: str
-    prompt: str
     task: str
-    accuracy: float
-    correct: int | None
+    topology: str
+    node_num: int | None
+    random_edge_count: int | None
+    seed: int | None
     max_samples: int | None
-    log_path: Path
-
-
-@dataclass
-class UQMetricRecord:
-    mode: str
-    model: str
-    prompt: str
-    task: str
+    uncertainty_mode: str
+    uq_adoption_mode: str
     accuracy: float | None
+    correct: int | None
+    total_time_sec: float | None
+    time_per_sample_sec: float | None
     metrics: dict[str, dict[str, float | int]]
     best_auroc_metric: str | None
     best_auroc: float | None
@@ -44,130 +67,85 @@ class UQMetricRecord:
     best_brier_metric: str | None
     best_brier: float | None
     metrics_path: Path
+    raw_preds_path: str | None
 
 
 def build_cli() -> argparse.ArgumentParser:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
-        description="Summarize experiment results for different UQ methods into comparison tables.",
+        description="Summarize MAS_UQ UQ metric JSON files into markdown and csv tables."
     )
-    parser.add_argument("--log-dir", type=Path, default=root / "log")
-    parser.add_argument("--uq-dir", type=Path, default=root / "preds" / "uq")
+    parser.add_argument("--uq-dir", type=Path, default=root / "outputs")
     parser.add_argument("--output-dir", type=Path, default=root / "results")
     return parser
 
 
-def extract_field(text: str, field: str) -> str | None:
-    match = FIELD_PATTERNS[field].search(text)
-    return match.group(1).strip() if match else None
+def parse_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def find_last_result_json(text: str) -> dict | None:
-    result = None
-    for line in text.splitlines():
-        line = line.strip()
-        if not RESULT_JSON_PATTERN.match(line):
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if "accuracy" in payload:
-            result = payload
-    return result
+def parse_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def detect_mode(log_name: str, args_line: str | None) -> str:
-    if "no_uq" in log_name:
-        return "no_uq"
-    if args_line and "--uncertainty_mode anchor" in args_line:
-        return "anchor"
-    if args_line and "--uncertainty_mode continuous" in args_line:
-        return "continuous"
-    if "anchor" in log_name:
-        return "anchor"
-    if "cont" in log_name:
-        return "continuous"
-    return "unknown"
+def format_float(value: float | None, digits: int = 4) -> str:
+    return "NA" if value is None else f"{value:.{digits}f}"
 
 
-def collect_accuracy_records(log_dir: Path) -> list[AccuracyRecord]:
-    records: list[AccuracyRecord] = []
-    for log_path in sorted(log_dir.glob("*.out")):
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-        payload = find_last_result_json(text)
-        if payload is None:
-            continue
-        model = extract_field(text, "model") or payload.get("model")
-        prompt = extract_field(text, "prompt")
-        task = extract_field(text, "task")
-        args_line = extract_field(text, "args")
-        mode = detect_mode(log_path.name, args_line)
-        if not model or not prompt or not task or mode == "unknown":
-            continue
-        records.append(
-            AccuracyRecord(
-                mode=mode,
-                model=model,
-                prompt=prompt,
-                task=task,
-                accuracy=float(payload["accuracy"]),
-                correct=payload.get("correct"),
-                max_samples=payload.get("max_samples"),
-                log_path=log_path,
-            )
-        )
-    return records
+def normalize_uncertainty_mode(value: object) -> str:
+    if value is None:
+        return "ASK4CONF"
+    text = str(value).strip()
+    if not text or text.lower() == "continuous":
+        return "ASK4CONF"
+    if "__" in text:
+        return text
+    if text.startswith("_"):
+        text = text[1:]
+    mapping = {
+        "ask4conf": "ASK4CONF",
+        "msp": "MSP",
+        "nll": "NLL",
+    }
+    return mapping.get(text.lower(), text)
 
 
-def choose_best_accuracy(records: list[AccuracyRecord]) -> dict[tuple[str, str, str, str], AccuracyRecord]:
-    best: dict[tuple[str, str, str, str], AccuracyRecord] = {}
-    for record in records:
-        key = (record.task, record.prompt, record.model, record.mode)
-        current = best.get(key)
-        if current is None or record.accuracy > current.accuracy:
-            best[key] = record
-    return best
+def normalize_uq_adoption_mode(value: object) -> str:
+    if value is None:
+        return "original"
+    text = str(value).strip().lower()
+    if text in {"", "original"}:
+        return "original"
+    if text in {"all_one", "all1", "adoptall1"}:
+        return "all_one"
+    return text
 
 
-def load_uq_metric_records(uq_dir: Path) -> list[UQMetricRecord]:
-    records: list[UQMetricRecord] = []
-    for path in sorted(uq_dir.glob("uq_metrics_*.json")):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        metadata = payload.get("metadata", {})
-        metrics = payload.get("metrics", {})
-        mode = metadata.get("uncertainty_mode", "unknown")
-        best_auroc_name, best_auroc = select_metric(metrics, "auroc", higher_is_better=True)
-        best_ece_name, best_ece = select_metric(metrics, "ece", higher_is_better=False)
-        best_brier_name, best_brier = select_metric(metrics, "brier", higher_is_better=False)
-        records.append(
-            UQMetricRecord(
-                mode=mode,
-                model=metadata.get("model", ""),
-                prompt=metadata.get("prompt", ""),
-                task=metadata.get("task", ""),
-                accuracy=metadata.get("accuracy"),
-                metrics=metrics,
-                best_auroc_metric=best_auroc_name,
-                best_auroc=best_auroc,
-                best_ece_metric=best_ece_name,
-                best_ece=best_ece,
-                best_brier_metric=best_brier_name,
-                best_brier=best_brier,
-                metrics_path=path,
-            )
-        )
-    return records
-
-
-def select_metric(metrics: dict, metric_name: str, higher_is_better: bool) -> tuple[str | None, float | None]:
+def select_metric(
+    metrics: dict[str, dict[str, float | int]],
+    metric_name: str,
+    *,
+    higher_is_better: bool,
+    allowed_metric_names: set[str] | None = None,
+) -> tuple[str | None, float | None]:
     best_name = None
     best_value = None
-    for name, values in metrics.items():
-        value = values.get(metric_name)
+    for name, values in ordered_metric_items(metrics):
+        if allowed_metric_names is not None and name not in allowed_metric_names:
+            continue
+        value = parse_float(values.get(metric_name))
         if value is None:
             continue
-        value = float(value)
         if best_value is None:
             best_name = name
             best_value = value
@@ -175,21 +153,148 @@ def select_metric(metrics: dict, metric_name: str, higher_is_better: bool) -> tu
         if higher_is_better and value > best_value:
             best_name = name
             best_value = value
-        if not higher_is_better and value < best_value:
+        elif not higher_is_better and value < best_value:
+            best_name = name
+            best_value = value
+        elif abs(value - best_value) < 1e-12:
             best_name = name
             best_value = value
     return best_name, best_value
 
 
-def format_float(value: float | None, digits: int = 4) -> str:
-    return "NA" if value is None else f"{value:.{digits}f}"
+def grouped_metric_names(metrics: dict[str, dict[str, float | int]], group_key: str) -> set[str]:
+    _, suffixes = METRIC_GROUPS[group_key]
+    return {
+        metric_name
+        for metric_name in metrics
+        if any(metric_name.endswith(suffix) for suffix in suffixes)
+    }
 
 
-def format_csv_value(value: object) -> str:
-    text = "" if value is None else str(value)
-    if any(ch in text for ch in [",", '"', "\n"]):
-        return '"' + text.replace('"', '""') + '"'
-    return text
+def ordered_metric_items(metrics: dict[str, dict[str, float | int]]) -> list[tuple[str, dict[str, float | int]]]:
+    ordered: list[tuple[str, dict[str, float | int]]] = []
+    seen: set[str] = set()
+    for metric_name in DETAIL_METRIC_ORDER:
+        values = metrics.get(metric_name)
+        if values is None:
+            continue
+        ordered.append((metric_name, values))
+        seen.add(metric_name)
+    for metric_name in sorted(metrics):
+        if metric_name in seen:
+            continue
+        ordered.append((metric_name, metrics[metric_name]))
+    return ordered
+
+
+def parse_filename(path: Path) -> dict[str, int | str | None]:
+    match = FILE_RE.match(path.name)
+    if not match:
+        return {}
+    groups = match.groupdict()
+    return {
+        "method": groups["method"],
+        "task": groups["task"],
+        "topology": groups["topology"],
+        "node_num": parse_int(groups["nodes"]),
+        "random_edge_count": parse_int(groups["edges"]),
+        "seed": parse_int(groups["seed"]),
+        "max_samples": parse_int(groups["max_samples"]),
+        "uncertainty_mode": normalize_uncertainty_mode(
+            groups.get("uncertainty_mode_slug_alt") or groups.get("uncertainty_mode_slug")
+        ),
+        "uq_adoption_mode": normalize_uq_adoption_mode(groups.get("adoption_mode_slug")),
+    }
+
+
+def infer_uq_adoption_mode_from_path(path: Path) -> str | None:
+    parts = path.parts
+    if "all_one" in parts:
+        return "all_one"
+    if "original" in parts:
+        return "original"
+    return None
+
+
+def is_standard_uq_metrics_path(path: Path) -> bool:
+    parts = path.parts
+    if "uq_formula_adoption_ablation" in parts:
+        return False
+    parent_names = {parent.name for parent in path.parents}
+    if "uq" not in parent_names:
+        return False
+    return True
+
+
+def load_metric_records(uq_dir: Path, *, include_ablation: bool = False) -> list[MetricRecord]:
+    records: list[MetricRecord] = []
+    for path in sorted(uq_dir.rglob("uq_metrics_*.json")):
+        if not include_ablation and not is_standard_uq_metrics_path(path):
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        metadata = payload.get("metadata", {})
+        metrics_payload = payload.get("metrics", {})
+        parsed = parse_filename(path)
+        path_adoption_mode = infer_uq_adoption_mode_from_path(path)
+
+        method = metadata.get("method") or parsed.get("method") or ""
+        task = metadata.get("task") or parsed.get("task") or ""
+        topology = metadata.get("mas_topology") or parsed.get("topology") or ""
+        node_num = parse_int(metadata.get("mas_node_num"))
+        if node_num is None:
+            node_num = parse_int(parsed.get("node_num"))
+        seed = parse_int(metadata.get("seed"))
+        if seed is None:
+            seed = parse_int(parsed.get("seed"))
+        max_samples = parse_int(metadata.get("max_samples"))
+        if max_samples is None:
+            max_samples = parse_int(parsed.get("max_samples"))
+        random_edge_count = parse_int(parsed.get("random_edge_count"))
+
+        metrics_by_method = metrics_payload.get("metrics_by_uq_method")
+        if isinstance(metrics_by_method, dict) and metrics_by_method:
+            items = [(normalize_uncertainty_mode(mode), values) for mode, values in metrics_by_method.items()]
+        else:
+            items = [(
+                normalize_uncertainty_mode(metadata.get("uncertainty_mode") or parsed.get("uncertainty_mode")),
+                metrics_payload,
+            )]
+
+        for uncertainty_mode, metrics in items:
+            best_auroc_metric, best_auroc = select_metric(metrics, "auroc", higher_is_better=True)
+            best_ece_metric, best_ece = select_metric(metrics, "ece", higher_is_better=False)
+            best_brier_metric, best_brier = select_metric(metrics, "brier", higher_is_better=False)
+
+            records.append(
+                MetricRecord(
+                    method=method,
+                    model=str(metadata.get("model", "")),
+                    task=task,
+                    topology=topology,
+                    node_num=node_num,
+                    random_edge_count=random_edge_count,
+                    seed=seed,
+                    max_samples=max_samples,
+                    uncertainty_mode=uncertainty_mode,
+                    uq_adoption_mode=normalize_uq_adoption_mode(
+                        path_adoption_mode or metadata.get("uq_adoption_mode") or parsed.get("uq_adoption_mode")
+                    ),
+                    accuracy=parse_float(metadata.get("accuracy")),
+                    correct=parse_int(metadata.get("correct")),
+                    total_time_sec=parse_float(metadata.get("total_time_sec")),
+                    time_per_sample_sec=parse_float(metadata.get("time_per_sample_sec")),
+                    metrics=metrics,
+                    best_auroc_metric=best_auroc_metric,
+                    best_auroc=best_auroc,
+                    best_ece_metric=best_ece_metric,
+                    best_ece=best_ece,
+                    best_brier_metric=best_brier_metric,
+                    best_brier=best_brier,
+                    metrics_path=path,
+                    raw_preds_path=metadata.get("raw_preds_path"),
+                )
+            )
+    return records
 
 
 def write_text(path: Path, content: str) -> None:
@@ -197,235 +302,332 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def build_accuracy_tables(best_records: dict[tuple[str, str, str, str], AccuracyRecord], output_dir: Path) -> str:
-    discovered_modes = {key[3] for key in best_records}
-    preferred_order = ["no_uq", "anchor", "continuous"]
-    modes = [mode for mode in preferred_order if mode in discovered_modes]
-    modes.extend(sorted(discovered_modes - set(modes)))
-    combos = sorted({key[:3] for key in best_records})
-    rows: list[dict[str, object]] = []
-    delta_modes = [mode for mode in modes if mode != "no_uq"]
-    markdown_lines = [
-        "| task | prompt | model | "
-        + " | ".join(f"{mode}_acc" for mode in modes)
-        + " | "
-        + " | ".join(f"{mode}_vs_no_uq" for mode in delta_modes)
-        + " | best_method | best_acc | best_vs_no_uq |",
-        "| --- | --- | --- | "
-        + " | ".join("---:" for _ in modes)
-        + " | "
-        + " | ".join("---:" for _ in delta_modes)
-        + " | --- | ---: | ---: |",
-    ]
-
-    for task, prompt, model in combos:
-        row: dict[str, object] = {"task": task, "prompt": prompt, "model": model}
-        mode_to_acc: dict[str, float] = {}
-        mode_to_log: dict[str, str] = {}
-        for mode in modes:
-            record = best_records.get((task, prompt, model, mode))
-            acc = record.accuracy if record else None
-            row[f"{mode}_acc"] = acc
-            row[f"{mode}_log"] = str(record.log_path) if record else ""
-            if acc is not None:
-                mode_to_acc[mode] = acc
-                mode_to_log[mode] = str(record.log_path)
-
-        if mode_to_acc:
-            best_acc = max(mode_to_acc.values())
-            best_methods = sorted(mode for mode, acc in mode_to_acc.items() if acc == best_acc)
-            best_method = "/".join(best_methods)
-        else:
-            best_acc = None
-            best_method = "NA"
-
-        no_uq_acc = mode_to_acc.get("no_uq")
-        for mode in delta_modes:
-            mode_acc = mode_to_acc.get(mode)
-            row[f"{mode}_vs_no_uq"] = None if mode_acc is None or no_uq_acc is None else mode_acc - no_uq_acc
-        best_vs_no_uq = None if best_acc is None or no_uq_acc is None else best_acc - no_uq_acc
-        row["best_method"] = best_method
-        row["best_acc"] = best_acc
-        row["best_vs_no_uq"] = best_vs_no_uq
-        rows.append(row)
-
-        markdown_lines.append(
-            f"| {task} | {prompt} | {model} | "
-            + " | ".join(format_float(row[f"{mode}_acc"]) if isinstance(row[f"{mode}_acc"], float) else "NA" for mode in modes)
-            + " | "
-            + " | ".join(
-                f"{row[f'{mode}_vs_no_uq']:+.4f}" if isinstance(row[f"{mode}_vs_no_uq"], float) else "NA"
-                for mode in delta_modes
-            )
-            + f" | {best_method} | {format_float(best_acc)} | "
-            + (f"{best_vs_no_uq:+.4f}" if best_vs_no_uq is not None else "NA")
-            + " |"
+def write_csv_summary(records: list[MetricRecord], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "method",
+                "model",
+                "task",
+                "topology",
+                "node_num",
+                "random_edge_count",
+                "seed",
+                "max_samples",
+                "uncertainty_mode",
+                "uq_adoption_mode",
+                "accuracy",
+                "correct",
+                "best_auroc_metric",
+                "best_auroc",
+                "best_ece_metric",
+                "best_ece",
+                "best_brier_metric",
+                "best_brier",
+                "time_per_sample_sec",
+                "metrics_path",
+                "raw_preds_path",
+            ]
         )
-
-    csv_headers = (
-        ["task", "prompt", "model"]
-        + [f"{mode}_acc" for mode in modes]
-        + [f"{mode}_vs_no_uq" for mode in delta_modes]
-        + [f"{mode}_log" for mode in modes]
-        + ["best_method", "best_acc", "best_vs_no_uq"]
-    )
-    csv_lines = [",".join(csv_headers)]
-    for row in rows:
-        csv_lines.append(",".join(format_csv_value(row.get(header)) for header in csv_headers))
-
-    json_path = output_dir / "uq_method_accuracy_summary.json"
-    md_path = output_dir / "uq_method_accuracy_summary.md"
-    csv_path = output_dir / "uq_method_accuracy_summary.csv"
-    write_text(json_path, json.dumps(rows, indent=2, ensure_ascii=False) + "\n")
-    write_text(md_path, "# UQ Method Accuracy Summary\n\n" + "\n".join(markdown_lines) + "\n")
-    write_text(csv_path, "\n".join(csv_lines) + "\n")
-    return f"Accuracy table: {md_path}"
-
-
-def build_uq_metric_tables(records: list[UQMetricRecord], output_dir: Path) -> str:
-    summary_rows: list[dict[str, object]] = []
-    detail_rows: list[dict[str, object]] = []
-    summary_markdown_lines = [
-        "| task | prompt | model | mode | accuracy | best_auroc_metric | best_auroc | best_ece_metric | best_ece | best_brier_metric | best_brier |",
-        "| --- | --- | --- | --- | ---: | --- | ---: | --- | ---: | --- | ---: |",
-    ]
-    detail_markdown_lines = [
-        "| task | prompt | model | mode | accuracy | metric_name | auroc | auroc_gap_to_best | ece | ece_gap_to_best | brier | brier_gap_to_best | n_with_uncertainty |",
-        "| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-    ]
-
-    for record in sorted(records, key=lambda x: (x.task, x.prompt, x.model, x.mode)):
-        summary_row = {
-            "task": record.task,
-            "prompt": record.prompt,
-            "model": record.model,
-            "mode": record.mode,
-            "accuracy": record.accuracy,
-            "best_auroc_metric": record.best_auroc_metric,
-            "best_auroc": record.best_auroc,
-            "best_ece_metric": record.best_ece_metric,
-            "best_ece": record.best_ece,
-            "best_brier_metric": record.best_brier_metric,
-            "best_brier": record.best_brier,
-            "metrics_path": str(record.metrics_path),
-        }
-        summary_rows.append(summary_row)
-        summary_markdown_lines.append(
-            f"| {record.task} | {record.prompt} | {record.model} | {record.mode} | "
-            f"{format_float(record.accuracy)} | {record.best_auroc_metric or 'NA'} | {format_float(record.best_auroc)} | "
-            f"{record.best_ece_metric or 'NA'} | {format_float(record.best_ece)} | "
-            f"{record.best_brier_metric or 'NA'} | {format_float(record.best_brier)} |"
-        )
-
-        for metric_name, metric_values in sorted(record.metrics.items()):
-            auroc = metric_values.get("auroc")
-            ece = metric_values.get("ece")
-            brier = metric_values.get("brier")
-            n_with_uncertainty = metric_values.get("n_with_uncertainty")
-            auroc_gap = None if auroc is None or record.best_auroc is None else record.best_auroc - float(auroc)
-            ece_gap = None if ece is None or record.best_ece is None else float(ece) - record.best_ece
-            brier_gap = None if brier is None or record.best_brier is None else float(brier) - record.best_brier
-            detail_row = {
-                "task": record.task,
-                "prompt": record.prompt,
-                "model": record.model,
-                "mode": record.mode,
-                "accuracy": record.accuracy,
-                "metric_name": metric_name,
-                "auroc": auroc,
-                "auroc_gap_to_best": auroc_gap,
-                "ece": ece,
-                "ece_gap_to_best": ece_gap,
-                "brier": brier,
-                "brier_gap_to_best": brier_gap,
-                "n_with_uncertainty": n_with_uncertainty,
-                "metrics_path": str(record.metrics_path),
-            }
-            detail_rows.append(detail_row)
-            detail_markdown_lines.append(
-                f"| {record.task} | {record.prompt} | {record.model} | {record.mode} | "
-                f"{format_float(record.accuracy)} | {metric_name} | "
-                f"{format_float(float(auroc) if auroc is not None else None)} | "
-                f"{f'+{auroc_gap:.4f}' if isinstance(auroc_gap, float) else 'NA'} | "
-                f"{format_float(float(ece) if ece is not None else None)} | "
-                f"{f'+{ece_gap:.4f}' if isinstance(ece_gap, float) else 'NA'} | "
-                f"{format_float(float(brier) if brier is not None else None)} | "
-                f"{f'+{brier_gap:.4f}' if isinstance(brier_gap, float) else 'NA'} | "
-                f"{n_with_uncertainty if n_with_uncertainty is not None else 'NA'} |"
+        for record in records:
+            writer.writerow(
+                [
+                    record.method,
+                    record.model,
+                    record.task,
+                    record.topology,
+                    record.node_num,
+                    record.random_edge_count,
+                    record.seed,
+                    record.max_samples,
+                    record.uncertainty_mode,
+                    record.uq_adoption_mode,
+                    record.accuracy,
+                    record.correct,
+                    record.best_auroc_metric,
+                    record.best_auroc,
+                    record.best_ece_metric,
+                    record.best_ece,
+                    record.best_brier_metric,
+                    record.best_brier,
+                    record.time_per_sample_sec,
+                    str(record.metrics_path),
+                    record.raw_preds_path or "",
+                ]
             )
 
-    summary_csv_headers = [
-        "task",
-        "prompt",
-        "model",
-        "mode",
-        "accuracy",
-        "best_auroc_metric",
-        "best_auroc",
-        "best_ece_metric",
-        "best_ece",
-        "best_brier_metric",
-        "best_brier",
-        "metrics_path",
-    ]
-    summary_csv_lines = [",".join(summary_csv_headers)]
-    for row in summary_rows:
-        summary_csv_lines.append(",".join(format_csv_value(row.get(header)) for header in summary_csv_headers))
 
-    detail_csv_headers = [
-        "task",
-        "prompt",
-        "model",
-        "mode",
-        "accuracy",
-        "metric_name",
-        "auroc",
-        "auroc_gap_to_best",
-        "ece",
-        "ece_gap_to_best",
-        "brier",
-        "brier_gap_to_best",
-        "n_with_uncertainty",
-        "metrics_path",
-    ]
-    detail_csv_lines = [",".join(detail_csv_headers)]
-    for row in detail_rows:
-        detail_csv_lines.append(",".join(format_csv_value(row.get(header)) for header in detail_csv_headers))
+def build_summary_markdown(records: list[MetricRecord]) -> str:
+    def is_main_setting(record: MetricRecord) -> bool:
+        if record.node_num != 5:
+            return False
+        if record.topology == "random":
+            return record.random_edge_count == 7
+        return True
 
-    summary_json_path = output_dir / "uq_metric_summary.json"
-    summary_md_path = output_dir / "uq_metric_summary.md"
-    summary_csv_path = output_dir / "uq_metric_summary.csv"
-    detail_json_path = output_dir / "uq_metric_details.json"
-    detail_md_path = output_dir / "uq_metric_details.md"
-    detail_csv_path = output_dir / "uq_metric_details.csv"
-    write_text(summary_json_path, json.dumps(summary_rows, indent=2, ensure_ascii=False) + "\n")
-    write_text(summary_md_path, "# UQ Metric Summary\n\n" + "\n".join(summary_markdown_lines) + "\n")
-    write_text(summary_csv_path, "\n".join(summary_csv_lines) + "\n")
-    write_text(detail_json_path, json.dumps(detail_rows, indent=2, ensure_ascii=False) + "\n")
-    write_text(detail_md_path, "# UQ Metric Details\n\n" + "\n".join(detail_markdown_lines) + "\n")
-    write_text(detail_csv_path, "\n".join(detail_csv_lines) + "\n")
-    return f"UQ metric tables: {summary_md_path}, {detail_md_path}"
+    def is_scaling_setting(record: MetricRecord) -> bool:
+        if record.uncertainty_mode != "ASK4CONF":
+            return False
+        if record.topology == "chain":
+            return record.node_num in {2, 4, 6, 8, 10}
+        if record.topology == "random":
+            return record.node_num == 5 and record.random_edge_count in {4, 5, 6, 7, 8, 9, 10}
+        if record.topology in {"star_convergent", "star_divergent"}:
+            return record.node_num in {4, 6, 8, 10}
+        return False
+
+    def render_table(section_records: list[MetricRecord]) -> list[str]:
+        table_lines = [
+            "| method | uq_mode | adoption | model | task | topology | node_num | edge_count | acc | best_auroc | auroc_metric | best_ece | ece_metric | best_brier | brier_metric |",
+            "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | ---: | --- |",
+        ]
+        for record in section_records:
+            table_lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        record.method or "NA",
+                        record.uncertainty_mode or "ASK4CONF",
+                        record.uq_adoption_mode or "original",
+                        record.model or "NA",
+                        record.task or "NA",
+                        record.topology or "NA",
+                        str(record.node_num) if record.node_num is not None else "NA",
+                        str(record.random_edge_count) if record.random_edge_count is not None else "NA",
+                        format_float(record.accuracy),
+                        format_float(record.best_auroc),
+                        record.best_auroc_metric or "NA",
+                        format_float(record.best_ece),
+                        record.best_ece_metric or "NA",
+                        format_float(record.best_brier),
+                        record.best_brier_metric or "NA",
+                    ]
+                )
+                + " |"
+            )
+        if len(table_lines) == 2:
+            table_lines.append("| NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA |")
+        return table_lines
+
+    main_records = [record for record in records if is_main_setting(record)]
+    scaling_records = [record for record in records if is_scaling_setting(record)]
+
+    lines = [
+        "# UQ Summary",
+        "",
+        f"Total runs: {len(records)}",
+        "",
+        "## Main Setting",
+        "",
+        f"Runs in section: {len(main_records)}",
+        "",
+        *render_table(main_records),
+        "",
+        "## Scaling",
+        "",
+        f"Runs in section: {len(scaling_records)}",
+        "",
+        *render_table(scaling_records),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def build_grouped_summary_markdown(records: list[MetricRecord]) -> str:
+    def is_main_setting(record: MetricRecord) -> bool:
+        if record.node_num != 5:
+            return False
+        if record.topology == "random":
+            return record.random_edge_count == 7
+        return True
+
+    def is_scaling_setting(record: MetricRecord) -> bool:
+        if record.uncertainty_mode != "ASK4CONF":
+            return False
+        if record.topology == "chain":
+            return record.node_num in {2, 4, 6, 8, 10}
+        if record.topology == "random":
+            return record.node_num == 5 and record.random_edge_count in {4, 5, 6, 7, 8, 9, 10}
+        if record.topology in {"star_convergent", "star_divergent"}:
+            return record.node_num in {4, 6, 8, 10}
+        return False
+
+    def render_table(section_records: list[MetricRecord], group_key: str) -> list[str]:
+        table_lines = [
+            "| method | uq_mode | adoption | model | task | topology | node_num | edge_count | acc | best_auroc | auroc_metric | best_ece | ece_metric | best_brier | brier_metric |",
+            "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | ---: | --- |",
+        ]
+        for record in section_records:
+            allowed_metric_names = grouped_metric_names(record.metrics, group_key)
+            best_auroc_metric, best_auroc = select_metric(
+                record.metrics,
+                "auroc",
+                higher_is_better=True,
+                allowed_metric_names=allowed_metric_names,
+            )
+            best_ece_metric, best_ece = select_metric(
+                record.metrics,
+                "ece",
+                higher_is_better=False,
+                allowed_metric_names=allowed_metric_names,
+            )
+            best_brier_metric, best_brier = select_metric(
+                record.metrics,
+                "brier",
+                higher_is_better=False,
+                allowed_metric_names=allowed_metric_names,
+            )
+            table_lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        record.method or "NA",
+                        record.uncertainty_mode or "ASK4CONF",
+                        record.uq_adoption_mode or "original",
+                        record.model or "NA",
+                        record.task or "NA",
+                        record.topology or "NA",
+                        str(record.node_num) if record.node_num is not None else "NA",
+                        str(record.random_edge_count) if record.random_edge_count is not None else "NA",
+                        format_float(record.accuracy),
+                        format_float(best_auroc),
+                        best_auroc_metric or "NA",
+                        format_float(best_ece),
+                        best_ece_metric or "NA",
+                        format_float(best_brier),
+                        best_brier_metric or "NA",
+                    ]
+                )
+                + " |"
+            )
+        if len(table_lines) == 2:
+            table_lines.append("| NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA | NA |")
+        return table_lines
+
+    def render_section(title: str, section_records: list[MetricRecord]) -> list[str]:
+        lines = [
+            f"## {title}",
+            "",
+            f"Runs in section: {len(section_records)}",
+            "",
+        ]
+        for group_key, (group_title, _) in METRIC_GROUPS.items():
+            lines.extend(
+                [
+                    f"### {group_title}",
+                    "",
+                    *render_table(section_records, group_key),
+                    "",
+                ]
+            )
+        return lines
+
+    main_records = [record for record in records if is_main_setting(record)]
+    scaling_records = [record for record in records if is_scaling_setting(record)]
+
+    lines = [
+        "# UQ Summary By Metric Group",
+        "",
+        "Each group includes its suffix-matched metrics plus System-Uncertainty-Final.",
+        "",
+        f"Total runs: {len(records)}",
+        "",
+        *render_section("Main Setting", main_records),
+        *render_section("Scaling", scaling_records),
+    ]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def build_detail_markdown(records: list[MetricRecord]) -> str:
+    lines = ["# UQ Metric Details", ""]
+    for record in records:
+        title = (
+            f"{record.method} | {record.uncertainty_mode or 'ASK4CONF'} | {record.model} | {record.task} | "
+            f"{record.topology} | nodes={record.node_num}"
+        )
+        if record.random_edge_count is not None:
+            title += f" | edges={record.random_edge_count}"
+        lines.append(f"## {title}")
+        lines.append("")
+        lines.append(f"- accuracy: {format_float(record.accuracy)}")
+        lines.append(f"- correct: {record.correct if record.correct is not None else 'NA'}")
+        lines.append(f"- seed: {record.seed if record.seed is not None else 'NA'}")
+        lines.append(f"- max_samples: {record.max_samples if record.max_samples is not None else 'NA'}")
+        lines.append(f"- uncertainty_mode: {record.uncertainty_mode or 'NA'}")
+        lines.append(f"- uq_adoption_mode: {record.uq_adoption_mode or 'original'}")
+        lines.append(f"- best_auroc: {format_float(record.best_auroc)} ({record.best_auroc_metric or 'NA'})")
+        lines.append(f"- best_ece: {format_float(record.best_ece)} ({record.best_ece_metric or 'NA'})")
+        lines.append(f"- best_brier: {format_float(record.best_brier)} ({record.best_brier_metric or 'NA'})")
+        lines.append(f"- metrics_path: {record.metrics_path}")
+        if record.raw_preds_path:
+            lines.append(f"- raw_preds_path: {record.raw_preds_path}")
+        lines.append("")
+        lines.append("| metric | n_with_uncertainty | auroc | ece | brier |")
+        lines.append("| --- | ---: | ---: | ---: | ---: |")
+        for metric_name, values in ordered_metric_items(record.metrics):
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        metric_name,
+                        str(values.get("n_with_uncertainty", "NA")),
+                        format_float(parse_float(values.get("auroc"))),
+                        format_float(parse_float(values.get("ece"))),
+                        format_float(parse_float(values.get("brier"))),
+                    ]
+                )
+                + " |"
+            )
+        lines.append("")
+    return "\n".join(lines)
 
 
 def main() -> None:
     parser = build_cli()
     args = parser.parse_args()
-    target_output_dir = args.output_dir / "uq_metric"
 
-    accuracy_records = collect_accuracy_records(args.log_dir)
-    best_accuracy = choose_best_accuracy(accuracy_records)
-    metric_records = load_uq_metric_records(args.uq_dir)
+    records = load_metric_records(args.uq_dir)
+    if not records:
+        raise SystemExit(f"No uq_metrics_*.json files found under {args.uq_dir}")
 
-    if not best_accuracy:
-        raise SystemExit(f"No experiment logs found in {args.log_dir}")
+    grouped: dict[str, list[MetricRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.uq_adoption_mode or "original", []).append(record)
 
-    accuracy_msg = build_accuracy_tables(best_accuracy, target_output_dir)
-    metric_msg = build_uq_metric_tables(metric_records, target_output_dir)
+    for uq_adoption_mode, mode_records in sorted(grouped.items()):
+        mode_records.sort(
+            key=lambda r: (
+                r.task,
+                r.uncertainty_mode,
+                r.model,
+                r.topology,
+                r.node_num if r.node_num is not None else -1,
+                r.random_edge_count if r.random_edge_count is not None else -1,
+                r.seed if r.seed is not None else -1,
+                r.metrics_path.name,
+            )
+        )
 
-    print(f"Collected {len(accuracy_records)} log records, {len(best_accuracy)} best accuracy records.")
-    print(accuracy_msg)
-    print(f"Collected {len(metric_records)} UQ metric files.")
-    print(metric_msg)
+        summary_md = build_summary_markdown(mode_records)
+        grouped_summary_md = build_grouped_summary_markdown(mode_records)
+        detail_md = build_detail_markdown(mode_records)
+
+        mode_output_dir = args.output_dir / uq_adoption_mode
+        summary_md_path = mode_output_dir / "uq_summary.md"
+        grouped_summary_md_path = mode_output_dir / "uq_summary_by_group.md"
+        summary_csv_path = mode_output_dir / "uq_summary.csv"
+        detail_md_path = mode_output_dir / "uq_metric_details.md"
+
+        write_text(summary_md_path, summary_md)
+        write_text(grouped_summary_md_path, grouped_summary_md)
+        write_text(detail_md_path, detail_md)
+        write_csv_summary(mode_records, summary_csv_path)
+
+        print(f"[{uq_adoption_mode}] Wrote markdown summary to: {summary_md_path}")
+        print(f"[{uq_adoption_mode}] Wrote grouped markdown summary to: {grouped_summary_md_path}")
+        print(f"[{uq_adoption_mode}] Wrote csv summary to: {summary_csv_path}")
+        print(f"[{uq_adoption_mode}] Wrote metric details to: {detail_md_path}")
 
 
 if __name__ == "__main__":

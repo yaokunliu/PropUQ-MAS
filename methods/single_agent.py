@@ -1,3 +1,4 @@
+import re
 from typing import Dict, List
 
 from models import ModelWrapper
@@ -10,6 +11,71 @@ from utils import (
     run_with_timeout,
     strip_structured_uncertainty_blocks,
 )
+
+LOGIT_UQ_METHODS = ("MSP", "NLL")
+
+
+def _selected_uq_methods(args) -> List[str]:
+    value = getattr(args, "uncertainty_modes", getattr(args, "uncertainty_mode", None))
+    if value is None:
+        return ["ASK4CONF"]
+    if isinstance(value, str):
+        values = [value]
+    else:
+        values = list(value)
+    out: List[str] = []
+    for item in values:
+        text = str(item).strip()
+        if not text:
+            continue
+        if text.lower() == "continuous":
+            text = "ASK4CONF"
+        if text not in out:
+            out.append(text)
+    return out or ["ASK4CONF"]
+
+
+def _uses_logit_uq(args) -> bool:
+    return any(method in LOGIT_UQ_METHODS for method in _selected_uq_methods(args))
+
+
+def _extract_agent_uncertainty(text: str):
+    if not text:
+        return None
+    match = re.search(
+        r'<agent_uncertainty\b[^>]*\bscore="([01](?:\.\d+)?|0?\.\d+)"[^>]*/?>',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return float(match.group(1))
+    match = re.search(
+        r"(?im)^\s*(?:agent'?s?\s+uncertainty|self[_\s-]*uncertainty)\s*[:=]\s*([01](?:\.\d+)?|0?\.\d+)\s*$",
+        text,
+    )
+    if match:
+        return float(match.group(1))
+    match = re.search(
+        r'<agent_confidence\s+score="([01](?:\.\d+)?|0?\.\d+)"\s*(?:/>|>)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return 1.0 - float(match.group(1))
+    return None
+
+
+def _self_uncertainty_by_method(args, generated_text: str, uq_stats: Dict | None) -> Dict[str, float | None]:
+    selected = _selected_uq_methods(args)
+    out: Dict[str, float | None] = {}
+    for method in selected:
+        if method == "ASK4CONF":
+            out[method] = _extract_agent_uncertainty(generated_text)
+        elif method == "MSP":
+            out[method] = None if uq_stats is None else uq_stats.get("msp")
+        elif method == "NLL":
+            out[method] = None if uq_stats is None else uq_stats.get("nll")
+    return out
 
 
 class SingleAgentMethod:
@@ -51,27 +117,34 @@ class SingleAgentMethod:
         prompts, input_ids, attention_mask, tokens_batch = self.model.prepare_chat_batch(
             batch_messages, add_generation_prompt=True
         )
-
         if self.use_vllm:
-            generated_batch = self.model.vllm_generate_text_batch(
+            generated_batch, generation_details = self.model.vllm_generate_text_batch(
                 prompts,
                 max_new_tokens=self.max_new_tokens,
                 temperature=self.temperature,
                 top_p=self.top_p,
+                return_generation_details=True,
             )
         else:
-            generated_batch, _ = self.model.generate_text_batch(
+            generated_batch, _, generation_details = self.model.generate_text_batch(
                 input_ids,
                 attention_mask,
                 max_new_tokens=self.max_new_tokens,
                 temperature=self.temperature,
                 top_p=self.top_p,
+                return_generation_details=True,
             )
 
         results: List[Dict] = []
 
         for idx, item in enumerate(items):
             generated_text = generated_batch[idx]
+            generation_detail = generation_details[idx]
+            self_uncertainty_by_method = _self_uncertainty_by_method(
+                self.args,
+                generated_text,
+                generation_detail.get("uq_stats"),
+            )
             generated_text_for_eval = strip_structured_uncertainty_blocks(generated_text)
 
             if self.task in ["mbppplus", "humanevalplus"]:
@@ -122,6 +195,11 @@ class SingleAgentMethod:
                 "input_ids": trimmed_ids,
                 "input_tokens": tokens_batch[idx],
                 "output": generated_text,
+                "self_uncertainty": self_uncertainty_by_method.get("ASK4CONF"),
+                "self_uncertainty_by_method": self_uncertainty_by_method,
+                "logits_uq_stats": generation_detail.get("uq_stats"),
+                "message_adoption": {},
+                "message_adoption_by_method": {},
             }
             results.append(
                 {

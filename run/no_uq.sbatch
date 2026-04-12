@@ -55,14 +55,17 @@ export HF_TOKEN="${HF_TOKEN:-$HUGGINGFACE_HUB_TOKEN}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 # Active runs depend on how many tasks below are uncommented:
-# total_runs = 2 models x 2 prompts x num_enabled_datasets.
+# total_runs = 2 models x 1 topology x num_enabled_datasets.
 declare -a models
 models[0]="google/gemma-3-12b-it"
 models[1]="Qwen/Qwen3-8B"
 
-declare -a prompts
-prompts[0]="sequential"
-prompts[1]="hierarchical"
+declare -a topologies
+topologies[0]="chain"
+
+declare -a mas_prompts
+mas_prompts[0]="norole"
+# mas_prompts[1]="role"
 
 declare -a tasks
 # tasks[0]="mbppplus"
@@ -77,16 +80,22 @@ generate_bs_default="${GENERATE_BS_DEFAULT:-16}"
 
 task_id="${SLURM_ARRAY_TASK_ID}"
 num_tasks=${#tasks[@]}
-num_prompts=${#prompts[@]}
+num_topologies=${#topologies[@]}
+num_prompts=${#mas_prompts[@]}
 
-model_idx=$(( task_id / (num_prompts * num_tasks) ))
-remainder=$(( task_id % (num_prompts * num_tasks) ))
+model_idx=$(( task_id / (num_topologies * num_prompts * num_tasks) ))
+remainder=$(( task_id % (num_topologies * num_prompts * num_tasks) ))
+topology_prompt_span=$(( num_prompts * num_tasks ))
+topology_idx=$(( remainder / topology_prompt_span ))
+remainder=$(( remainder % topology_prompt_span ))
 prompt_idx=$(( remainder / num_tasks ))
 dataset_idx=$(( remainder % num_tasks ))
 
 model="${models[$model_idx]}"
-prompt="${prompts[$prompt_idx]}"
+topology="${topologies[$topology_idx]}"
+mas_prompt="${mas_prompts[$prompt_idx]}"
 task="${tasks[$dataset_idx]}"
+mas_node_num="${MAS_NODE_NUM:-4}"
 
 if [ "$task" = "mbppplus" ] || [ "$task" = "humanevalplus" ]; then
   max_new_tokens="$max_new_tokens_code"
@@ -102,11 +111,13 @@ else
   generate_bs="$generate_bs_default"
 fi
 
-current_args="--method mas --use_vllm --model_name $model --prompt $prompt --max_samples $max_samples --max_new_tokens $max_new_tokens --generate_bs $generate_bs --task $task --gpu_memory_utilization $gpu_memory_utilization"
+current_args="--method mas --use_vllm --model_name $model --max_samples $max_samples --max_new_tokens $max_new_tokens --generate_bs $generate_bs --task $task --gpu_memory_utilization $gpu_memory_utilization --mas_topology $topology --mas_node_num $mas_node_num --mas_prompt $mas_prompt"
 
 echo "STARTING: job=$SLURM_JOB_ID array_task=$SLURM_ARRAY_TASK_ID node=$(hostname)"
 echo "MODEL: $model"
-echo "PROMPT: $prompt"
+echo "MAS_TOPOLOGY: $topology"
+echo "MAS_NODE_NUM: $mas_node_num"
+echo "MAS_PROMPT: $mas_prompt"
 echo "TASK: $task"
 echo "GENERATE_BS: $generate_bs"
 echo "GPU_MEMORY_UTILIZATION: $gpu_memory_utilization"

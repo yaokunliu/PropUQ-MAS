@@ -4,3 +4,5 @@ numpy
 tqdm
 accelerate
 datasets
+# Requires the Graphviz system executable (`dot`) separately for SVG export.
+graphviz

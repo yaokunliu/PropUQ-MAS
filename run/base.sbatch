@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=base_aime2024_anchor
+#SBATCH --job-name=nll_4_qwen8b_mbbplus_role
 #SBATCH --account=bgfy-dtai-gh
 #SBATCH --partition=ghx4
 #SBATCH --time=5:00:00
@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=64G
-#SBATCH --array=0-3
+#SBATCH --array=0
 #SBATCH --output=/u/yliu105/MAS_UQ/log/%x_%A_%a.out
 #SBATCH --error=/u/yliu105/MAS_UQ/log/%x_%A_%a.err
 
@@ -54,39 +54,128 @@ export HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-$HF_TOKEN}"
 export HF_TOKEN="${HF_TOKEN:-$HUGGINGFACE_HUB_TOKEN}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-# Active runs depend on how many tasks below are uncommented:
-# total_runs = 2 models x 2 prompts x num_enabled_datasets.
-declare -a models
-models[0]="google/gemma-3-12b-it"
-models[1]="Qwen/Qwen3-8B"
+# Configure these lists directly.
+models=(
+  # "google/gemma-3-12b-it"
+  "Qwen/Qwen3-8B"
+)
 
-declare -a prompts
-prompts[0]="sequential"
-prompts[1]="hierarchical"
+topologies=(
+  # "chain"
+  # "star_convergent"
+  # "star_divergent"
+  "net"
+  # "random"
+)
 
-declare -a tasks
-# tasks[0]="mbppplus"
-tasks[0]="aime2024"
-# tasks[0]="aime2025"
-# tasks[0]="humanevalplus"
+tasks=(
+  "mbppplus"
+  # "gsm8k"
+  # "aime2024"
+  # "aime2025"
+  # "gpqa"
+  # "arc_easy"
+  # "arc_challenge"
+  # "humanevalplus"
+  # "medqa"
+)
+
+mas_prompts=(
+  # "norole"
+  "role"
+)
+
+node_counts=(
+  # "5"
+  # "2"
+  "4"
+  # "6"
+  # "8"
+  # "10"
+)
+
+# Used only when topology == random.
+random_edge_counts=(
+  # "4"
+  # "5"
+  # "6"
+  "7"
+  # "8"
+  # "9"
+  # "10"
+)
 
 max_samples="${MAX_SAMPLES:--1}"
 max_new_tokens_default="${MAX_NEW_TOKENS_DEFAULT:-8192}"
 max_new_tokens_code="${MAX_NEW_TOKENS_CODE:-65536}"
 generate_bs_default="${GENERATE_BS_DEFAULT:-16}"
+generate_only="${GENERATE_ONLY:-1}"
+uncertainty_mode_sets=(
+  # "ASK4CONF"
+  # "MSP"
+  "NLL"
+  # "LOGIT_UQ_BUNDLE"
+)
 
+declare -a spec_models
+declare -a spec_topologies
+declare -a spec_tasks
+declare -a spec_mas_prompts
+declare -a spec_node_counts
+declare -a spec_random_edge_counts
+declare -a spec_uncertainty_mode_sets
+
+for model in "${models[@]}"; do
+  for topology in "${topologies[@]}"; do
+    for task in "${tasks[@]}"; do
+      for mas_prompt in "${mas_prompts[@]}"; do
+        for node_num in "${node_counts[@]}"; do
+          for uncertainty_mode_set in "${uncertainty_mode_sets[@]}"; do
+            if [ "$topology" = "random" ]; then
+              for edge_count in "${random_edge_counts[@]}"; do
+                spec_models+=("$model")
+                spec_topologies+=("$topology")
+                spec_tasks+=("$task")
+                spec_mas_prompts+=("$mas_prompt")
+                spec_node_counts+=("$node_num")
+                spec_random_edge_counts+=("$edge_count")
+                spec_uncertainty_mode_sets+=("$uncertainty_mode_set")
+              done
+            else
+              spec_models+=("$model")
+              spec_topologies+=("$topology")
+              spec_tasks+=("$task")
+              spec_mas_prompts+=("$mas_prompt")
+              spec_node_counts+=("$node_num")
+              spec_random_edge_counts+=("")
+              spec_uncertainty_mode_sets+=("$uncertainty_mode_set")
+            fi
+          done
+        done
+      done
+    done
+  done
+done
+
+total_runs=${#spec_models[@]}
+if [ "$total_runs" -eq 0 ]; then
+  echo "No runs configured. Please set at least one model, topology, task, node count, and uncertainty_mode_set."
+  exit 1
+fi
 task_id="${SLURM_ARRAY_TASK_ID}"
-num_tasks=${#tasks[@]}
-num_prompts=${#prompts[@]}
+if [ "$task_id" -lt 0 ] || [ "$task_id" -ge "$total_runs" ]; then
+  echo "Invalid SLURM_ARRAY_TASK_ID=$task_id; valid range is 0..$((total_runs - 1))"
+  echo "Update #SBATCH --array to match the configured lists."
+  exit 1
+fi
 
-model_idx=$(( task_id / (num_prompts * num_tasks) ))
-remainder=$(( task_id % (num_prompts * num_tasks) ))
-prompt_idx=$(( remainder / num_tasks ))
-dataset_idx=$(( remainder % num_tasks ))
-
-model="${models[$model_idx]}"
-prompt="${prompts[$prompt_idx]}"
-task="${tasks[$dataset_idx]}"
+model="${spec_models[$task_id]}"
+topology="${spec_topologies[$task_id]}"
+task="${spec_tasks[$task_id]}"
+mas_prompt="${spec_mas_prompts[$task_id]}"
+mas_node_num="${spec_node_counts[$task_id]}"
+random_edge_count="${spec_random_edge_counts[$task_id]}"
+uncertainty_mode_set="${spec_uncertainty_mode_sets[$task_id]}"
 
 if [ "$task" = "mbppplus" ] || [ "$task" = "humanevalplus" ]; then
   max_new_tokens="$max_new_tokens_code"
@@ -102,17 +191,51 @@ else
   generate_bs="$generate_bs_default"
 fi
 
-current_args="--method mas --use_vllm --model_name $model --prompt $prompt --max_samples $max_samples --max_new_tokens $max_new_tokens --generate_bs $generate_bs --task $task --gpu_memory_utilization $gpu_memory_utilization --uncertainty_mode anchor --generate_only" # continuous | anchor
+current_args=(
+  --method mas
+  --use_vllm
+  --model_name "$model"
+  --max_samples "$max_samples"
+  --max_new_tokens "$max_new_tokens"
+  --generate_bs "$generate_bs"
+  --task "$task"
+  --gpu_memory_utilization "$gpu_memory_utilization"
+  --mas_topology "$topology"
+  --mas_node_num "$mas_node_num"
+  --mas_prompt "$mas_prompt"
+  --force_generation
+)
+if [ -n "$random_edge_count" ]; then
+  current_args+=(--random_edge_count "$random_edge_count")
+fi
+if [ "$generate_only" = "1" ]; then
+  current_args+=(--generate_only)
+fi
+IFS=',' read -r -a uncertainty_modes <<< "$uncertainty_mode_set"
+for uq_mode in "${uncertainty_modes[@]}"; do
+  uq_mode="${uq_mode#"${uq_mode%%[![:space:]]*}"}"
+  uq_mode="${uq_mode%"${uq_mode##*[![:space:]]}"}"
+  [ -z "$uq_mode" ] && continue
+  current_args+=(--uncertainty_mode "$uq_mode")
+done
 
 echo "STARTING: job=$SLURM_JOB_ID array_task=$SLURM_ARRAY_TASK_ID node=$(hostname)"
 echo "MODEL: $model"
-echo "PROMPT: $prompt"
+echo "MAS_TOPOLOGY: $topology"
+echo "MAS_NODE_NUM: $mas_node_num"
+echo "MAS_PROMPT: $mas_prompt"
+if [ -n "$random_edge_count" ]; then
+  echo "RANDOM_EDGE_COUNT: $random_edge_count"
+fi
 echo "TASK: $task"
+echo "UNCERTAINTY_MODES: $uncertainty_mode_set"
 echo "GENERATE_BS: $generate_bs"
 echo "GPU_MEMORY_UTILIZATION: $gpu_memory_utilization"
-echo "ARGS: $current_args"
+printf 'ARGS:'
+printf ' %q' "${current_args[@]}"
+printf '\n'
 echo "TIME: $(date)"
 
-python -u run.py $current_args
+python -u run.py "${current_args[@]}"
 
 echo "COMPLETED: job=$SLURM_JOB_ID array_task=$SLURM_ARRAY_TASK_ID node=$(hostname) time=$(date)"

@@ -4,16 +4,15 @@ from typing import List
 
 @dataclass
 class Agent:
+    index: int
     name: str
     role: str
 
 
-def default_agents() -> List[Agent]:
+def default_agents(node_num: int = 4) -> List[Agent]:
     return [
-        Agent(name="Planner", role="planner"),
-        Agent(name="Critic", role="critic"),
-        Agent(name="Refiner", role="refiner"),
-        Agent(name="Judger", role="judger"),
+        Agent(index=idx, name=f"Agent {idx + 1}", role="agent")
+        for idx in range(node_num)
     ]
 
 

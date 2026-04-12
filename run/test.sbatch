@@ -8,9 +8,9 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=64G
-#SBATCH --array=1,3
-#SBATCH --output=/u/yliu105/MAS_UQ/test/%x_%A_%a.out
-#SBATCH --error=/u/yliu105/MAS_UQ/test/%x_%A_%a.err
+#SBATCH --array=0
+#SBATCH --output=/u/yliu105/MAS_UQ/test/test_%x_%A_%a.out
+#SBATCH --error=/u/yliu105/MAS_UQ/test/test_%x_%A_%a.err
 
 set -euo pipefail
 
@@ -55,35 +55,117 @@ export HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-$HF_TOKEN}"
 export HF_TOKEN="${HF_TOKEN:-$HUGGINGFACE_HUB_TOKEN}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-# posthoc UQ test:
-# 1) sequential + self_report(anchor)
-# 2) sequential + self_report(continuous)
-# 3) hierarchical + self_report(anchor)
-# 4) hierarchical + self_report(continuous)
 max_samples=16
 max_new_tokens_long=8192
-task="medqa"
-# model="google/gemma-3-12b-it"
-model="Qwen/Qwen3-8B"
-# model="mistralai/Ministral-3-8B-Instruct-2512"
+model="Qwen/Qwen3-8B" # Qwen/Qwen3-8B | google/gemma-3-12b-it
+tasks=(
+  "mbppplus"
+  # "gsm8k"
+  # "aime2024"
+  # "aime2025"
+  # "gpqa"
+  # "arc_easy"
+  # "arc_challenge"
+  # "humanevalplus"
+  # "medqa"
+)
+mas_prompts=(
+  # "norole"
+  "role"
+)
+topologies=(
+  # "chain"
+  "star_convergent"
+  # "star_divergent"
+  # "tree"
+  # "net"
+  # "random"
+)
+node_counts=(
+  "4"
+)
+uncertainty_mode_sets=(
+  "ASK4CONF"
+  # "LOGIT_UQ_BUNDLE"
+  # "MSP"
+  # "NLL"
+)
 
-# 4 runs with vLLM + self_report uncertainty mode, followed by posthoc UQ.
-declare -a args
-args[1]="--method mas --use_vllm --model_name $model --prompt sequential --max_samples $max_samples --max_new_tokens $max_new_tokens_long --task $task --uncertainty_mode anchor"
-# args[2]="--method mas --use_vllm --model_name $model --prompt sequential --max_samples $max_samples --max_new_tokens $max_new_tokens_long --task $task --uncertainty_mode continuous"
-args[3]="--method mas --use_vllm --model_name $model --prompt hierarchical --max_samples $max_samples --max_new_tokens $max_new_tokens_long --task $task --uncertainty_mode anchor"
-# args[4]="--method mas --use_vllm --model_name $model --prompt hierarchical --max_samples $max_samples --max_new_tokens $max_new_tokens_long --task $task --uncertainty_mode continuous"
+declare -a spec_topologies
+declare -a spec_tasks
+declare -a spec_node_counts
+declare -a spec_mas_prompts
+declare -a spec_uncertainty_mode_sets
 
-current_args="${args[$SLURM_ARRAY_TASK_ID]}"
-if [ -z "${current_args:-}" ]; then
-  echo "No args configured for SLURM_ARRAY_TASK_ID=$SLURM_ARRAY_TASK_ID"
+for topology in "${topologies[@]}"; do
+  for task in "${tasks[@]}"; do
+    for mas_prompt in "${mas_prompts[@]}"; do
+      for node_num in "${node_counts[@]}"; do
+        for uncertainty_mode_set in "${uncertainty_mode_sets[@]}"; do
+          spec_topologies+=("$topology")
+          spec_tasks+=("$task")
+          spec_mas_prompts+=("$mas_prompt")
+          spec_node_counts+=("$node_num")
+          spec_uncertainty_mode_sets+=("$uncertainty_mode_set")
+        done
+      done
+    done
+  done
+done
+
+total_runs=${#spec_topologies[@]}
+if [ "$total_runs" -eq 0 ]; then
+  echo "No runs configured. Please set at least one task, topology, node count, and uncertainty_mode_set."
+  exit 1
+fi
+task_id="${SLURM_ARRAY_TASK_ID}"
+if [ "$task_id" -lt 0 ] || [ "$task_id" -ge "$total_runs" ]; then
+  echo "Invalid SLURM_ARRAY_TASK_ID=$task_id; valid range is 0..$((total_runs - 1))"
+  echo "Update #SBATCH --array to match the configured lists."
   exit 1
 fi
 
+mas_topology="${spec_topologies[$task_id]}"
+task="${spec_tasks[$task_id]}"
+mas_prompt="${spec_mas_prompts[$task_id]}"
+mas_node_num="${spec_node_counts[$task_id]}"
+uncertainty_mode_set="${spec_uncertainty_mode_sets[$task_id]}"
+
+current_args=(
+  --method mas
+  --use_vllm
+  --model_name "$model"
+  --max_samples "$max_samples"
+  --max_new_tokens "$max_new_tokens_long"
+  --task "$task"
+  --mas_topology "$mas_topology"
+  --mas_node_num "$mas_node_num"
+  --mas_prompt "$mas_prompt"
+  --force_generation
+)
+if [ "$mas_topology" = "random" ]; then
+  current_args+=(--random_edge_count 7)
+fi
+IFS=',' read -r -a uncertainty_modes <<< "$uncertainty_mode_set"
+for uq_mode in "${uncertainty_modes[@]}"; do
+  uq_mode="${uq_mode#"${uq_mode%%[![:space:]]*}"}"
+  uq_mode="${uq_mode%"${uq_mode##*[![:space:]]}"}"
+  [ -z "$uq_mode" ] && continue
+  current_args+=(--uncertainty_mode "$uq_mode")
+done
+
 echo "STARTING: job=$SLURM_JOB_ID array_task=$SLURM_ARRAY_TASK_ID node=$(hostname)"
-echo "ARGS: $current_args"
+echo "MODEL: $model"
+echo "TASK: $task"
+echo "MAS_TOPOLOGY: $mas_topology"
+echo "MAS_NODE_NUM: $mas_node_num"
+echo "MAS_PROMPT: $mas_prompt"
+echo "UNCERTAINTY_MODES: $uncertainty_mode_set"
+printf 'ARGS:'
+printf ' %q' "${current_args[@]}"
+printf '\n'
 echo "TIME: $(date)"
 
-python -u run.py $current_args
+python -u run.py "${current_args[@]}"
 
 echo "COMPLETED: job=$SLURM_JOB_ID array_task=$SLURM_ARRAY_TASK_ID node=$(hostname) time=$(date)"

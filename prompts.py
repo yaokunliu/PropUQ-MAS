@@ -52,6 +52,19 @@ def _answer_format_reminder(args, *, role: str = "", mas_style: str = "") -> str
     )
 
 
+def _uses_ask4conf(args) -> bool:
+    if args is None:
+        return False
+    value = getattr(args, "uncertainty_modes", getattr(args, "uncertainty_mode", None))
+    if value is None:
+        return True
+    if isinstance(value, str):
+        values = [value]
+    else:
+        values = list(value)
+    return any(str(item).strip().lower() in {"ask4conf", "continuous"} for item in values)
+
+
 def _build_uncertainty_instruction(
     args,
     *,
@@ -61,106 +74,27 @@ def _build_uncertainty_instruction(
 ) -> str:
     if args is None:
         return ""
-    score_mode = getattr(args, "uncertainty_mode", None)
-    if score_mode not in {"anchor", "continuous"}:
+    if not _uses_ask4conf(args):
         return ""
-    if score_mode == "continuous":
-        lines = ["", "After providing your response according to the requirements, report the following values as numbers in the range [0,1]:"]
-        lines.append("- Report your own self_uncertainty (self_uncertainty indicates the probability that your current answer or action may be wrong.)")
-        if allow_message_adoption:
-            lines.append(
-                "- Report your message_adoption_weight (message_adoption_weight indicates the percentage to which you agree with an incoming message in your current step. A higher value means you largely follow its requirements or content, while a lower value means you rely less on it and instead critique, verify, filter, or only partially use it.)"
-            )
-            lines.append(_build_message_adoption_guidance(args=args, role=role, mas_style=mas_style))
-        # lines.extend(
-        #     [
-        #         "",
-        #         "Soft ranges for self_uncertainty:",
-        #     "- [0.00, 0.10]: almost certainly correct",
-        #     "- (0.10, 0.30]: low self_uncertainty",
-        #     "- (0.30, 0.70): meaningful self_uncertainty",
-        #     "- [0.70, 0.90): high self_uncertainty",
-        #     "- [0.90, 1.00]: almost certainly wrong",
-        #     "",
-        #     "Soft ranges for message_adoption_weight:",
-        #     "- [0.00, 0.10]: almost no reliance",
-        #     "- (0.10, 0.30]: weak reliance",
-        #     "- (0.30, 0.70): partial reliance",
-        #     "- [0.70, 0.90): strong reliance",
-        #     "- [0.90, 1.00]: near-total reliance",
-        #     "",
-        #     ]
-        # )
-        lines.extend(
-            [
-                "",
-                "Soft ranges for self_uncertainty:",
-                "- [0.00, 0.05]: almost certainly correct; use only in rare boundary cases",
-                "- (0.05, 0.20]: low self_uncertainty",
-                "- (0.20, 0.60]: moderate self_uncertainty (default range)",
-                "- (0.60, 0.85]: high self_uncertainty",
-                "- (0.85, 1.00]: almost certainly wrong; use only in rare boundary cases",
-                "",
-                "Soft ranges for message_adoption_weight:",
-                "- [0.00, 0.10]: almost no reliance",
-                "- (0.10, 0.30]: weak reliance",
-                "- (0.30, 0.70): partial reliance",
-                "- [0.70, 0.90): strong reliance",
-                "- [0.90, 1.00]: near-total reliance",
-                "",
-            ]
+    lines = ["", "After providing your response according to the requirements, report the following values as numbers in the range [0,1]:"]
+    lines.append("- Report your own self_uncertainty (self_uncertainty indicates the probability that your current answer or action may be wrong.)")
+    if allow_message_adoption:
+        lines.append(
+            "- Report your message_adoption_weight (message_adoption_weight indicates the percentage to which you agree with an incoming message in your current step. A higher value means you largely follow its requirements or content, while a lower value means you rely less on it and instead critique, verify, filter, or only partially use it.)"
         )
-        lines.extend(
-            [
-                "",
-                "## After the answer, you MUST append (one line per item):",
-                "<agent_uncertainty score=\"FLOAT_0_TO_1\"/>",
-            ]
-        )
-        if allow_message_adoption:
-            for target in _message_adoption_targets(role=role, mas_style=mas_style):
-                lines.append(
-                    f"<message_adoption agent=\"{target}\" score=\"FLOAT_0_TO_1\"/>"
-                )
-    else:
-        lines = ["", "After providing your response according to the requirements, report the following using only one of the allowed values [\"VL\", \"L\", \"M\", \"H\", \"VH\"] (VL = very low, L = low, M = medium, H = high, VH = very high):"]
-        lines.append("- report your own self_uncertainty (self_uncertainty indicates the level at which your current answer or action may be wrong).")
-        if allow_message_adoption:
-            lines.append(
-                "- report a message_adoption score for each specified agent whose message was provided to you (message_adoption_weight indicates the level to which you agree with an incoming message in your current step. A higher value means you largely follow its requirements or content, while a lower value means you rely less on it and instead critique, verify, filter, or only partially use it.)"
-            )
-            lines.append(_build_message_adoption_guidance(args=args, role=role, mas_style=mas_style))
-        lines.extend(
-            [
-                "",
-            "self_uncertainty anchors:",
-            "- VL: task is clear and evidence is sufficient",
-            "- L: mostly reliable, with a small local gap",
-            "- M: mixed confidence with real chance of error",
-            "- H: significant uncertainty remains because of missing evidence, weak reasoning, or unclear context",
-            "- VH: highly unreliable",
+        lines.append(_build_message_adoption_guidance(args=args, role=role, mas_style=mas_style))
+    lines.extend(
+        [
             "",
-            "message_adoption_weight anchors:",
-            "- VL: barely rely on incoming message; mostly inspect/challenge/correct",
-            "- L: weak reference only",
-            "- M: partial reliance with independent judgment",
-            "- H: important input for this step",
-            "- VH: strongly follow incoming message",
-            "",
-            ]
-        )
-        lines.extend(
-            [
-                "",
-                "## After the answer, you MUST append (one line per item):",
-                "<agent_uncertainty level=\"ONE_OF_VL_L_M_H_VH\"/>",
-            ]
-        )
-        if allow_message_adoption:
-            for target in _message_adoption_targets(role=role, mas_style=mas_style):
-                lines.append(
-                    f"<message_adoption agent=\"{target}\" level=\"ONE_OF_VL_L_M_H_VH\"/>"
-                )
+            "## After the answer, you MUST append (one line per item):",
+            "<agent_uncertainty score=\"FLOAT_0_TO_1\"/>",
+        ]
+    )
+    if allow_message_adoption:
+        for target in _message_adoption_targets(role=role, mas_style=mas_style):
+            lines.append(
+                f"<message_adoption agent=\"{target}\" score=\"FLOAT_0_TO_1\"/>"
+            )
 
     return "\n".join(lines)
 
@@ -184,7 +118,7 @@ def _message_adoption_targets(*, role: str = "", mas_style: str = ""):
 
 
 def _build_message_adoption_guidance(*, args, role: str = "", mas_style: str = "") -> str:
-    if args is None or getattr(args, "uncertainty_mode", None) not in {"anchor", "continuous"}:
+    if args is None or not _uses_ask4conf(args):
         return ""
 
     targets = _message_adoption_targets(role=role, mas_style=mas_style)
@@ -199,6 +133,139 @@ def _build_message_adoption_guidance(*, args, role: str = "", mas_style: str = "
     else:
         target_text = ", ".join(targets[:-1]) + f", and {targets[-1]}"
     return f"Score the message_adoption_weight for messages from {target_text}."
+
+
+def _build_message_adoption_guidance_for_targets(targets) -> str:
+    targets = [str(target).strip() for target in (targets or []) if str(target).strip()]
+    if not targets:
+        return ""
+    if len(targets) == 1:
+        return f"Score the message_adoption_weight for the message from {targets[0]}."
+    if len(targets) == 2:
+        return f"Score the message_adoption_weight for messages from {targets[0]} and {targets[1]}."
+    return f"Score the message_adoption_weight for messages from {', '.join(targets[:-1])}, and {targets[-1]}."
+
+
+def _build_uncertainty_instruction_for_targets(args, *, adoption_targets=None) -> str:
+    if args is None:
+        return ""
+    if not _uses_ask4conf(args):
+        return ""
+
+    adoption_targets = [str(target).strip() for target in (adoption_targets or []) if str(target).strip()]
+    allow_message_adoption = bool(adoption_targets)
+    lines = ["", "After providing your response according to the requirements, report the following values as numbers in the range [0,1]:"]
+    lines.append("- Report your own self_uncertainty (self_uncertainty indicates the probability that your current answer or action may be wrong.)")
+    if allow_message_adoption:
+        lines.append("- Report one message_adoption_weight for each directly connected incoming agent whose answer was provided to you.")
+        lines.append(_build_message_adoption_guidance_for_targets(adoption_targets))
+    lines.extend(
+        [
+            "",
+            "## After the answer, you MUST append (one line per item):",
+            "<agent_uncertainty score=\"FLOAT_0_TO_1\"/>",
+        ]
+    )
+    for target in adoption_targets:
+        lines.append(f"<message_adoption agent=\"{target}\" score=\"FLOAT_0_TO_1\"/>")
+    return "\n".join(lines)
+
+
+def _task_answer_instruction(args) -> str:
+    task = getattr(args, "task", None) if args is not None else None
+    if task in ["mbppplus", "humanevalplus"]:
+        return (
+            "Your answer must be self-contained Python function(s) in markdown code block(s). "
+            "Do not put feedback inside code blocks."
+        )
+    if task in ["gsm8k", "aime2024", "aime2025"]:
+        return "Your final answer must appear inside \\boxed{YOUR_FINAL_ANSWER}."
+    if task in ["arc_easy", "arc_challenge", "gpqa", "medqa"]:
+        return "Your final answer must be selected from A, B, C, D and appear inside \\boxed{YOUR_FINAL_ANSWER}."
+    if task in ["winogrande"]:
+        return "Your final answer must be selected from 1 or 2 and appear inside \\boxed{YOUR_FINAL_ANSWER}."
+    return "Present a clear final answer at the end of your response."
+
+
+def _task_answer_placeholder(args) -> str:
+    task = getattr(args, "task", None) if args is not None else None
+    if task in ["mbppplus", "humanevalplus"]:
+        return "```python\nYOUR_PYTHON_CODE\n```"
+    if task in ["gsm8k", "aime2024", "aime2025", "arc_easy", "arc_challenge", "gpqa", "medqa", "winogrande"]:
+        return "\\boxed{YOUR_FINAL_ANSWER}"
+    return "[Your own answer here]"
+
+
+def build_agent_messages_graph_text_mas(
+    *,
+    agent_label: str,
+    question: str,
+    context: str = "",
+    incoming_agents=None,
+    method=None,
+    args=None,
+):
+    system_message = _system_message_for_model(args)
+    assert method in ["mas"], "only for mas method"
+
+    incoming_agents = [str(agent).strip() for agent in (incoming_agents or []) if str(agent).strip()]
+    ctx = _truncate_context(context, args.mas_context_length)
+    answer_instruction = _task_answer_instruction(args)
+    answer_placeholder = _task_answer_placeholder(args)
+
+    if not incoming_agents:
+        user_content = f"""
+You are {agent_label} in a multi-agent system. Each node in the MAS is one agent.
+
+Solve the input question independently and provide only your own answer. Do not provide feedback because you are the first agent in this information flow.
+
+## Input Question:
+{question}
+
+{answer_instruction}
+
+## Format your response as follows:
+## Answer
+{answer_placeholder}
+
+Now, output your response below.
+"""
+    else:
+        incoming_text = "\n".join(f"- {agent_name}" for agent_name in incoming_agents)
+        user_content = f"""
+You are {agent_label} in a multi-agent system. Each node in the MAS is one agent.
+
+You are given answers from the directly connected previous agents listed below. Independently verify each incoming answer, decide whether you agree, and identify what should be improved. If you disagree, provide an alternative solution. Then provide feedback and your own answer.
+
+## Input Question:
+{question}
+
+## Directly Connected Incoming Agents:
+{incoming_text}
+
+## Answers From Directly Connected Incoming Agents:
+{ctx}
+
+{answer_instruction}
+
+## Format your response as follows:
+## Feedback
+- Agent X: [State whether you agree, what is correct, and what should be improved]
+
+## Answer
+{answer_placeholder}
+
+Now, output your response below.
+"""
+
+    user_content = _attach_uncertainty_instruction(
+        user_content,
+        _build_uncertainty_instruction_for_targets(args, adoption_targets=incoming_agents),
+    )
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_content},
+    ]
 
 
 def _attach_uncertainty_instruction(prompt_text: str, uncertainty_text: str) -> str:

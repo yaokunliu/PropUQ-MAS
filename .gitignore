@@ -42,6 +42,8 @@ log/
 logs_bak/
 test/
 data/
+results/
+outputs/
 
 # Slurm outputs
 slurm-*.out
@@ -50,3 +52,5 @@ slurm-*.err
 *.sbatch.err
 
 run.sbatch
+note.txt
+
