@@ -220,19 +220,17 @@ class MASMethod:
                 out[method] = None if uq_stats is None else uq_stats.get("nll")
         return out
 
-    def _message_adoption_by_method(
+    def _message_adoption(
         self,
         text: str,
         incoming_labels: List[str],
-    ) -> Dict[str, Dict[str, float]]:
+    ) -> Dict[str, float]:
         selected = _selected_uq_methods(self.args)
-        out: Dict[str, Dict[str, float]] = {}
-        if "ASK4CONF" in selected:
-            out["ASK4CONF"] = self._extract_message_adoption_scores(text)
-        for method in selected:
-            if method in LOGIT_UQ_METHODS:
-                out[method] = self._default_message_adoption_scores(incoming_labels)
-        return out
+        if "ASK4CONF" in selected or "NLL" in selected:
+            return self._extract_message_adoption_scores(text)
+        if any(method in LOGIT_UQ_METHODS for method in selected):
+            return self._default_message_adoption_scores(incoming_labels)
+        return {}
 
     @staticmethod
     def _strip_think_blocks(text: str) -> str:
@@ -262,6 +260,9 @@ class MASMethod:
         mode = getattr(self.args, "mas_inter_agent_think", "strip")
         cleaned = text.strip() if mode == "pass" else self._strip_think_blocks(text)
         return self._strip_uncertainty_metadata(cleaned)
+
+    def _nll_target_text(self, *, agent_idx: int, text: str, peer_output: str) -> str:
+        return (text or "").strip()
 
     @staticmethod
     def _extract_answer_only(text: str) -> str:
@@ -352,6 +353,7 @@ class MASMethod:
             raise ValueError("Batch size exceeds configured generate_bs")
 
         batch_size = len(items)
+        selected_methods = _selected_uq_methods(self.args)
         trace_maps: List[dict[int, dict]] = [{} for _ in range(batch_size)]
         legacy_contexts = ["" for _ in range(batch_size)]
         history_contexts = ["" for _ in range(batch_size)]
@@ -433,14 +435,12 @@ class MASMethod:
                             "input_tokens": tokens_batch[pos],
                             "output": "",
                             "peer_output": "",
+                            "nll_target_text": "",
                             "self_uncertainty": None,
-                            "self_uncertainty_by_method": {method: None for method in _selected_uq_methods(self.args)},
+                            "self_uncertainty_by_method": {method: None for method in selected_methods},
                             "logits_uq_stats": None,
-                            "message_adoption": {},
-                            "message_adoption_by_method": {
-                                method: (self._default_message_adoption_scores(incoming_labels) if method in LOGIT_UQ_METHODS else {})
-                                for method in _selected_uq_methods(self.args)
-                            },
+                            "logits_uq_stats_nll_target": None,
+                            "message_adoption": self._message_adoption("", incoming_labels),
                             "skipped": True,
                             "skip_reason": skip_reasons[item_idx],
                         }
@@ -472,21 +472,52 @@ class MASMethod:
                     return_generation_details=True,
                 )
 
+            parsed_outputs = []
             for kept_pos, item_idx in enumerate(kept_item_indices):
                 text_out = generated_texts[kept_pos].strip()
                 generation_detail = generation_details[kept_pos]
-                self_uncertainty_by_method = self._self_uncertainty_by_method(
-                    text_out,
-                    generation_detail.get("uq_stats"),
-                )
-                message_adoption_by_method = self._message_adoption_by_method(text_out, incoming_labels)
-                self_uncertainty = self_uncertainty_by_method.get("ASK4CONF")
-                message_adoption = message_adoption_by_method.get("ASK4CONF", {})
                 peer_context = self._context_text_for_next_agent(text_out)
                 if self._is_legacy_prompt_mode():
                     peer_output = peer_context
                 else:
                     peer_output = self._extract_answer_only(peer_context)
+                parsed_outputs.append(
+                    {
+                        "kept_pos": kept_pos,
+                        "item_idx": item_idx,
+                        "text_out": text_out,
+                        "generation_detail": generation_detail,
+                        "peer_output": peer_output,
+                        "nll_target_text": self._nll_target_text(
+                            agent_idx=agent.index,
+                            text=text_out,
+                            peer_output=peer_output,
+                        ),
+                    }
+                )
+
+            for parsed_pos, parsed_output in enumerate(parsed_outputs):
+                kept_pos = parsed_output["kept_pos"]
+                item_idx = parsed_output["item_idx"]
+                text_out = parsed_output["text_out"]
+                generation_detail = parsed_output["generation_detail"]
+                nll_target_stat = None
+                if "NLL" in selected_methods:
+                    nll_target_stat = self.model.target_uq_stats_from_generation(
+                        generation_text=text_out,
+                        generated_token_ids=list(generation_detail.get("generated_token_ids") or []),
+                        token_logprobs=list(generation_detail.get("token_logprobs") or []),
+                        target_text=parsed_output["nll_target_text"],
+                        prefer_last=True,
+                    )
+                self_uncertainty_by_method = self._self_uncertainty_by_method(
+                    text_out,
+                    generation_detail.get("uq_stats"),
+                )
+                if "NLL" in selected_methods and nll_target_stat is not None:
+                    self_uncertainty_by_method["NLL"] = nll_target_stat.get("nll")
+                message_adoption = self._message_adoption(text_out, incoming_labels)
+                self_uncertainty = self_uncertainty_by_method.get("ASK4CONF")
                 trimmed_ids = kept_input_ids[kept_pos][kept_attention_mask[kept_pos].bool()].to("cpu").tolist()
 
                 trace_maps[item_idx][agent.index] = {
@@ -499,30 +530,31 @@ class MASMethod:
                     "input_ids": trimmed_ids,
                     "input_tokens": kept_tokens_batch[kept_pos],
                     "output": text_out,
-                    "peer_output": peer_output,
+                    "peer_output": parsed_output["peer_output"],
+                    "nll_target_text": parsed_output["nll_target_text"],
                     "self_uncertainty": self_uncertainty,
                     "self_uncertainty_by_method": self_uncertainty_by_method,
                     "logits_uq_stats": generation_detail.get("uq_stats"),
+                    "logits_uq_stats_nll_target": nll_target_stat,
                     "message_adoption": message_adoption,
-                    "message_adoption_by_method": message_adoption_by_method,
                 }
 
                 if self.prompt_mode == "legacy_sequential":
-                    formatted_output = f"[{self._context_label(agent.index)}]:\n{peer_output}\n\n"
+                    formatted_output = f"[{self._context_label(agent.index)}]:\n{parsed_output['peer_output']}\n\n"
                     if agent.role != "judger":
                         history_contexts[item_idx] += formatted_output
                         legacy_contexts[item_idx] = formatted_output
                     else:
                         final_texts[item_idx] = text_out
                 elif self.prompt_mode == "legacy_hierarchical":
-                    formatted_output = f"[{self._context_label(agent.index)}]:\n{peer_output}\n\n"
+                    formatted_output = f"[{self._context_label(agent.index)}]:\n{parsed_output['peer_output']}\n\n"
                     if agent.role != "judger":
                         history_contexts[item_idx] += formatted_output
                         legacy_contexts[item_idx] += formatted_output
                     else:
                         final_texts[item_idx] = text_out
                 else:
-                    history_contexts[item_idx] += f"[{agent.name}]\n{peer_output}\n\n"
+                    history_contexts[item_idx] += f"[{agent.name}]\n{parsed_output['peer_output']}\n\n"
                 if not self._is_legacy_prompt_mode() and agent.index == self.graph.node_num - 1:
                     final_texts[item_idx] = text_out
 

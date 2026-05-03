@@ -65,22 +65,35 @@ def _is_divergent_star(pred: Dict) -> bool:
     return graph.get("topology") == "star_divergent"
 
 
-def _agent_aliases(name: str, role: str) -> List[str]:
+_LEGACY_ROLE_LABEL_ALIASES = {
+    "planner": ("Planner Agent", "Math Agent"),
+    "critic": ("Critic Agent", "Science Agent"),
+    "refiner": ("Refiner Agent", "Code Agent"),
+    "judger": ("Judger Agent", "Task Summarizer"),
+}
+
+
+def _agent_aliases(name: str, role: str, fallback_idx: Optional[int] = None) -> List[str]:
     aliases = {name, role}
     agent_num_match = re.search(r"(\d+)", str(name))
     if agent_num_match:
         aliases.add(f"Agent {agent_num_match.group(1)}")
+    if fallback_idx is not None:
+        aliases.add(f"Agent {fallback_idx + 1}")
+    for label in _LEGACY_ROLE_LABEL_ALIASES.get(str(role).lower(), ()):
+        aliases.add(label)
     return [alias for alias in aliases if alias]
 
 
-def _graph_incoming_agent_names(agent: Dict, pred: Dict) -> List[str] | None:
+def _graph_incoming_agent_names(agent: Dict, pred: Dict, fallback_idx: Optional[int] = None) -> List[str] | None:
     if isinstance(agent.get("incoming_agents"), list):
         return [str(name) for name in agent.get("incoming_agents", []) if str(name).strip()]
     graph = pred.get("mas_graph") or {}
     incoming = graph.get("incoming", {})
-    name = str(agent.get("name", ""))
-    if isinstance(incoming, dict) and name in incoming:
-        return [str(label) for label in incoming.get(name, []) if str(label).strip()]
+    if isinstance(incoming, dict):
+        for alias in _agent_aliases(str(agent.get("name", "")), str(agent.get("role", "")), fallback_idx):
+            if alias in incoming:
+                return [str(label) for label in incoming.get(alias, []) if str(label).strip()]
     return None
 
 
@@ -88,10 +101,11 @@ def _graph_hazard_time_step_index(agent: Dict, pred: Dict, fallback_idx: int) ->
     if isinstance(pred.get("mas_graph"), dict):
         graph = pred["mas_graph"]
         levels = graph.get("levels", {})
-        name = str(agent.get("name", ""))
-        level = levels.get(name)
-        if isinstance(level, int):
-            return level
+        if isinstance(levels, dict):
+            for alias in _agent_aliases(str(agent.get("name", "")), str(agent.get("role", "")), fallback_idx):
+                level = levels.get(alias)
+                if isinstance(level, int):
+                    return level
     return fallback_idx
 
 
@@ -203,14 +217,14 @@ def _agent_self_uncertainty_for_method(agent: Dict, uq_method: str) -> Optional[
 
 
 def _agent_message_adoption_for_method(agent: Dict, uq_method: str) -> Dict[str, float]:
+    value = agent.get("message_adoption", {})
+    if isinstance(value, dict):
+        return value
     by_method = agent.get("message_adoption_by_method")
     if isinstance(by_method, dict):
         method_value = by_method.get(uq_method)
         if isinstance(method_value, dict):
             return method_value
-    if uq_method == "ASK4CONF":
-        value = agent.get("message_adoption", {})
-        return value if isinstance(value, dict) else {}
     return {}
 
 
@@ -272,7 +286,7 @@ def enrich_mas_pred_with_posthoc_uncertainty(pred: Dict, adoption_mode: str = "o
             self_uncertainty = _agent_self_uncertainty_for_method(agent, uq_method)
             structural_self_uncertainty = _normalized_structural_uncertainty(self_uncertainty, uq_method)
             hazard_step_idx = _graph_hazard_time_step_index(agent, pred, fallback_idx)
-            incoming_agent_names = _graph_incoming_agent_names(agent, pred) or []
+            incoming_agent_names = _graph_incoming_agent_names(agent, pred, fallback_idx) or []
             message_adoption = _resolved_message_adoption_for_method(
                 agent,
                 uq_method,
@@ -289,12 +303,16 @@ def enrich_mas_pred_with_posthoc_uncertainty(pred: Dict, adoption_mode: str = "o
             agent.setdefault("self_uncertainty_num_by_method", {})[uq_method] = parse_uncertainty_value(self_uncertainty)
             agent.setdefault("formula_uncertainty_by_method", {})[uq_method] = formula_uncertainty
             formula_values.append(formula_uncertainty)
+            if hazard_step_idx >= len(hazard_step_formula_uncertainties):
+                hazard_step_formula_uncertainties.extend(
+                    [] for _ in range(hazard_step_idx + 1 - len(hazard_step_formula_uncertainties))
+                )
             hazard_step_formula_uncertainties[hazard_step_idx].append(formula_uncertainty)
             agent_hazard_step_indices.append(hazard_step_idx)
             parsed_self = parse_uncertainty_value(self_uncertainty)
             if parsed_self is not None:
                 self_values.append(parsed_self)
-            for alias in _agent_aliases(name, role):
+            for alias in _agent_aliases(name, role, fallback_idx):
                 if formula_uncertainty is not None:
                     formula_uncertainty_states[_normalize_agent_label(alias)] = formula_uncertainty
 

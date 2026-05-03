@@ -65,6 +65,17 @@ def _extract_agent_uncertainty(text: str):
     return None
 
 
+def _strip_think_blocks(text: str) -> str:
+    cleaned = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"</?think>", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _nll_target_text(text: str) -> str:
+    return (text or "").strip()
+
+
 def _self_uncertainty_by_method(args, generated_text: str, uq_stats: Dict | None) -> Dict[str, float | None]:
     selected = _selected_uq_methods(args)
     out: Dict[str, float | None] = {}
@@ -103,6 +114,7 @@ class SingleAgentMethod:
     def run_batch(self, items: List[Dict]) -> List[Dict]:
         if len(items) > self.generate_bs:
             raise ValueError("Batch size exceeds configured generate_bs")
+        selected_methods = _selected_uq_methods(self.args)
         model_name = str(getattr(self.args, "model_name", "")).lower()
         use_instruct_template = "gemma" in model_name
         prompt_builder = (
@@ -140,11 +152,22 @@ class SingleAgentMethod:
         for idx, item in enumerate(items):
             generated_text = generated_batch[idx]
             generation_detail = generation_details[idx]
+            nll_target_stat = None
+            if "NLL" in selected_methods:
+                nll_target_stat = self.model.target_uq_stats_from_generation(
+                    generation_text=generated_text,
+                    generated_token_ids=list(generation_detail.get("generated_token_ids") or []),
+                    token_logprobs=list(generation_detail.get("token_logprobs") or []),
+                    target_text=_nll_target_text(generated_text),
+                    prefer_last=True,
+                )
             self_uncertainty_by_method = _self_uncertainty_by_method(
                 self.args,
                 generated_text,
                 generation_detail.get("uq_stats"),
             )
+            if "NLL" in selected_methods and nll_target_stat is not None:
+                self_uncertainty_by_method["NLL"] = nll_target_stat.get("nll")
             generated_text_for_eval = strip_structured_uncertainty_blocks(generated_text)
 
             if self.task in ["mbppplus", "humanevalplus"]:
@@ -195,11 +218,12 @@ class SingleAgentMethod:
                 "input_ids": trimmed_ids,
                 "input_tokens": tokens_batch[idx],
                 "output": generated_text,
+                "nll_target_text": _nll_target_text(generated_text),
                 "self_uncertainty": self_uncertainty_by_method.get("ASK4CONF"),
                 "self_uncertainty_by_method": self_uncertainty_by_method,
                 "logits_uq_stats": generation_detail.get("uq_stats"),
+                "logits_uq_stats_nll_target": nll_target_stat,
                 "message_adoption": {},
-                "message_adoption_by_method": {},
             }
             results.append(
                 {

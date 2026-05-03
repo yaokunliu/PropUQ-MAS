@@ -53,16 +53,33 @@ def _answer_format_reminder(args, *, role: str = "", mas_style: str = "") -> str
 
 
 def _uses_ask4conf(args) -> bool:
+    return "ASK4CONF" in _selected_uq_methods(args)
+
+
+def _uses_nll(args) -> bool:
+    return "NLL" in _selected_uq_methods(args)
+
+
+def _selected_uq_methods(args) -> list[str]:
     if args is None:
-        return False
+        return []
     value = getattr(args, "uncertainty_modes", getattr(args, "uncertainty_mode", None))
     if value is None:
-        return True
+        return ["ASK4CONF"]
     if isinstance(value, str):
         values = [value]
     else:
         values = list(value)
-    return any(str(item).strip().lower() in {"ask4conf", "continuous"} for item in values)
+    out = []
+    for item in values:
+        text = str(item).strip()
+        if not text:
+            continue
+        if text.lower() == "continuous":
+            text = "ASK4CONF"
+        if text not in out:
+            out.append(text)
+    return out or ["ASK4CONF"]
 
 
 def _build_uncertainty_instruction(
@@ -74,23 +91,26 @@ def _build_uncertainty_instruction(
 ) -> str:
     if args is None:
         return ""
-    if not _uses_ask4conf(args):
+    use_ask4conf = _uses_ask4conf(args)
+    use_nll = _uses_nll(args)
+    use_message_adoption = allow_message_adoption and (use_ask4conf or use_nll)
+    if not use_ask4conf and not use_message_adoption:
         return ""
-    lines = ["", "After providing your response according to the requirements, report the following values as numbers in the range [0,1]:"]
-    lines.append("- Report your own self_uncertainty (self_uncertainty indicates the probability that your current answer or action may be wrong.)")
-    if allow_message_adoption:
+    lines = [""]
+    if use_ask4conf:
+        lines.append("After providing your response according to the requirements, report the following values as numbers in the range [0,1]:")
+        lines.append("- Report your own self_uncertainty (self_uncertainty indicates the probability that your current answer or action may be wrong.)")
+    elif use_message_adoption:
+        lines.append("After providing your response according to the requirements, report message_adoption_weight only. Do not report self_uncertainty.")
+    if use_message_adoption:
         lines.append(
             "- Report your message_adoption_weight (message_adoption_weight indicates the percentage to which you agree with an incoming message in your current step. A higher value means you largely follow its requirements or content, while a lower value means you rely less on it and instead critique, verify, filter, or only partially use it.)"
         )
         lines.append(_build_message_adoption_guidance(args=args, role=role, mas_style=mas_style))
-    lines.extend(
-        [
-            "",
-            "## After the answer, you MUST append (one line per item):",
-            "<agent_uncertainty score=\"FLOAT_0_TO_1\"/>",
-        ]
-    )
-    if allow_message_adoption:
+    lines.extend(["", "## After the answer, you MUST append (one line per item):"])
+    if use_ask4conf:
+        lines.append("<agent_uncertainty score=\"FLOAT_0_TO_1\"/>")
+    if use_message_adoption:
         for target in _message_adoption_targets(role=role, mas_style=mas_style):
             lines.append(
                 f"<message_adoption agent=\"{target}\" score=\"FLOAT_0_TO_1\"/>"
@@ -118,7 +138,7 @@ def _message_adoption_targets(*, role: str = "", mas_style: str = ""):
 
 
 def _build_message_adoption_guidance(*, args, role: str = "", mas_style: str = "") -> str:
-    if args is None or not _uses_ask4conf(args):
+    if args is None:
         return ""
 
     targets = _message_adoption_targets(role=role, mas_style=mas_style)
@@ -149,25 +169,28 @@ def _build_message_adoption_guidance_for_targets(targets) -> str:
 def _build_uncertainty_instruction_for_targets(args, *, adoption_targets=None) -> str:
     if args is None:
         return ""
-    if not _uses_ask4conf(args):
+    use_ask4conf = _uses_ask4conf(args)
+    use_nll = _uses_nll(args)
+    adoption_targets = [str(target).strip() for target in (adoption_targets or []) if str(target).strip()]
+    use_message_adoption = bool(adoption_targets) and (use_ask4conf or use_nll)
+    if not use_ask4conf and not use_message_adoption:
         return ""
 
-    adoption_targets = [str(target).strip() for target in (adoption_targets or []) if str(target).strip()]
-    allow_message_adoption = bool(adoption_targets)
-    lines = ["", "After providing your response according to the requirements, report the following values as numbers in the range [0,1]:"]
-    lines.append("- Report your own self_uncertainty (self_uncertainty indicates the probability that your current answer or action may be wrong.)")
-    if allow_message_adoption:
+    lines = [""]
+    if use_ask4conf:
+        lines.append("After providing your response according to the requirements, report the following values as numbers in the range [0,1]:")
+        lines.append("- Report your own self_uncertainty (self_uncertainty indicates the probability that your current answer or action may be wrong.)")
+    elif use_message_adoption:
+        lines.append("After providing your response according to the requirements, report message_adoption_weight only. Do not report self_uncertainty.")
+    if use_message_adoption:
         lines.append("- Report one message_adoption_weight for each directly connected incoming agent whose answer was provided to you.")
         lines.append(_build_message_adoption_guidance_for_targets(adoption_targets))
-    lines.extend(
-        [
-            "",
-            "## After the answer, you MUST append (one line per item):",
-            "<agent_uncertainty score=\"FLOAT_0_TO_1\"/>",
-        ]
-    )
-    for target in adoption_targets:
-        lines.append(f"<message_adoption agent=\"{target}\" score=\"FLOAT_0_TO_1\"/>")
+    lines.extend(["", "## After the answer, you MUST append (one line per item):"])
+    if use_ask4conf:
+        lines.append("<agent_uncertainty score=\"FLOAT_0_TO_1\"/>")
+    if use_message_adoption:
+        for target in adoption_targets:
+            lines.append(f"<message_adoption agent=\"{target}\" score=\"FLOAT_0_TO_1\"/>")
     return "\n".join(lines)
 
 

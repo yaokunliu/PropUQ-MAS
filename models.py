@@ -154,6 +154,57 @@ def _uq_stats_from_cumulative_logprob(
     }
 
 
+def _extract_vllm_token_logprob(entry, token_id: int) -> Optional[float]:
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        value = entry.get(int(token_id))
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        logprob = getattr(value, "logprob", None)
+        if logprob is not None:
+            return float(logprob)
+    if isinstance(entry, (int, float)):
+        return float(entry)
+    logprob = getattr(entry, "logprob", None)
+    if logprob is not None:
+        return float(logprob)
+    return None
+
+
+def _extract_vllm_sampled_token_logprobs(
+    sample_logprobs,
+    token_ids: List[int],
+) -> List[Optional[float]]:
+    if not sample_logprobs or not token_ids:
+        return []
+    chosen: List[Optional[float]] = []
+    for token_id, entry in zip(token_ids, list(sample_logprobs)):
+        chosen.append(_extract_vllm_token_logprob(entry, int(token_id)))
+    return chosen
+
+
+def _find_subsequence_bounds(
+    haystack: List[int],
+    needle: List[int],
+    *,
+    prefer_last: bool = True,
+) -> Optional[Tuple[int, int]]:
+    if not needle or len(needle) > len(haystack):
+        return None
+    match_indices: List[int] = []
+    last_start = len(haystack) - len(needle)
+    for start in range(last_start + 1):
+        if haystack[start:start + len(needle)] == needle:
+            match_indices.append(start)
+    if not match_indices:
+        return None
+    start = match_indices[-1] if prefer_last else match_indices[0]
+    return start, start + len(needle)
+
+
 class ModelWrapper:
     def __init__(self, model_name: str, device: torch.device, use_vllm: bool = False, args=None):
         self.model_name = model_name
@@ -271,6 +322,64 @@ class ModelWrapper:
             tokens_batch.append(self.tokenizer.convert_ids_to_tokens(active_ids))
         return prompts, input_ids, attention_mask, tokens_batch
 
+    def target_uq_stats_from_generation(
+        self,
+        *,
+        generation_text: str,
+        generated_token_ids: List[int],
+        token_logprobs: List[Optional[float]],
+        target_text: str,
+        prefer_last: bool = True,
+    ) -> Dict[str, Optional[float]]:
+        target_text = str(target_text or "")
+        if not target_text or not generated_token_ids or not token_logprobs:
+            return _uq_stats_from_raw_logits([])
+
+        usable_logprobs = list(token_logprobs[:len(generated_token_ids)])
+        if not usable_logprobs:
+            return _uq_stats_from_raw_logits([])
+
+        target_ids = self.tokenizer(
+            target_text,
+            add_special_tokens=False,
+        )["input_ids"]
+        bounds = _find_subsequence_bounds(
+            list(generated_token_ids),
+            list(target_ids),
+            prefer_last=prefer_last,
+        )
+
+        if bounds is None and generation_text and target_text:
+            retok = self.tokenizer(
+                generation_text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+            full_ids = list(retok["input_ids"])
+            offsets = list(retok["offset_mapping"])
+            if len(full_ids) == len(generated_token_ids):
+                char_start = generation_text.rfind(target_text) if prefer_last else generation_text.find(target_text)
+                if char_start != -1:
+                    char_end = char_start + len(target_text)
+                    covered = [
+                        idx
+                        for idx, (start, end) in enumerate(offsets)
+                        if end > char_start and start < char_end
+                    ]
+                    if covered:
+                        bounds = covered[0], covered[-1] + 1
+
+        if bounds is None:
+            return _uq_stats_from_raw_logits([])
+
+        start, end = bounds
+        chosen_logprobs = [
+            float(logprob)
+            for logprob in usable_logprobs[start:end]
+            if logprob is not None
+        ]
+        return _uq_stats_from_raw_logits(chosen_logprobs)
+
     def vllm_generate_text_batch(
         self,
         prompts: List[str],
@@ -304,6 +413,10 @@ class ModelWrapper:
             detail = {
                 "text_raw": raw_text,
                 "generated_token_ids": token_ids,
+                "token_logprobs": _extract_vllm_sampled_token_logprobs(
+                    getattr(first, "logprobs", None),
+                    token_ids,
+                ),
                 "uq_stats": _uq_stats_from_cumulative_logprob(
                     getattr(first, "cumulative_logprob", None),
                     len(token_ids),
@@ -405,6 +518,7 @@ class ModelWrapper:
                 {
                     "text_raw": raw_text,
                     "generated_token_ids": token_ids,
+                    "token_logprobs": list(chosen_logprobs[row_idx]),
                     "uq_stats": _uq_stats_from_raw_logits(chosen_logprobs[row_idx]),
                 }
             )

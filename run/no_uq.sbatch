@@ -21,11 +21,26 @@ export PYTHONUNBUFFERED=1
 if [ -f ~/.bashrc ]; then
   source ~/.bashrc
 fi
-if ! command -v module >/dev/null 2>&1; then
-  echo "module command not found; cannot load cuda-compat/12.9"
-  exit 1
+cuda_version="unknown"
+driver_version="unknown"
+cuda_version_ge_12_9=0
+if command -v nvidia-smi >/dev/null 2>&1; then
+  cuda_version="$(nvidia-smi | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -n1)"
+  driver_version="$(nvidia-smi | sed -n 's/.*Driver Version: \([0-9.]*\).*/\1/p' | head -n1)"
 fi
-module load cuda-compat/12.9
+if [[ "${cuda_version:-}" =~ ^[0-9]+(\.[0-9]+)*$ ]] && [ "$(printf '%s\n' "12.9" "${cuda_version}" | sort -V | head -n1)" = "12.9" ]; then
+  cuda_version_ge_12_9=1
+fi
+if [ "${cuda_version_ge_12_9}" = "1" ]; then
+  echo "Detected CUDA Version ${cuda_version} on driver ${driver_version}; skipping cuda-compat/12.9 because current support is already >= 12.9"
+else
+  if ! command -v module >/dev/null 2>&1; then
+    echo "module command not found; cannot load cuda-compat/12.9"
+    exit 1
+  fi
+  echo "Detected CUDA Version ${cuda_version:-unknown}; loading cuda-compat/12.9"
+  module load cuda-compat/12.9
+fi
 if command -v nvidia-smi >/dev/null 2>&1; then
   cuda_version="$(nvidia-smi | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -n1)"
   if [[ "${cuda_version:-}" != 12.9* ]]; then
@@ -77,6 +92,7 @@ max_samples="${MAX_SAMPLES:--1}"
 max_new_tokens_default="${MAX_NEW_TOKENS_DEFAULT:-8192}"
 max_new_tokens_code="${MAX_NEW_TOKENS_CODE:-65536}"
 generate_bs_default="${GENERATE_BS_DEFAULT:-16}"
+SEED="${SEED:-42}"
 
 task_id="${SLURM_ARRAY_TASK_ID}"
 num_tasks=${#tasks[@]}
@@ -111,7 +127,20 @@ else
   generate_bs="$generate_bs_default"
 fi
 
-current_args="--method mas --use_vllm --model_name $model --max_samples $max_samples --max_new_tokens $max_new_tokens --generate_bs $generate_bs --task $task --gpu_memory_utilization $gpu_memory_utilization --mas_topology $topology --mas_node_num $mas_node_num --mas_prompt $mas_prompt"
+current_args=(
+  --method mas
+  --use_vllm
+  --model_name "$model"
+  --max_samples "$max_samples"
+  --max_new_tokens "$max_new_tokens"
+  --generate_bs "$generate_bs"
+  --task "$task"
+  --gpu_memory_utilization "$gpu_memory_utilization"
+  --mas_topology "$topology"
+  --mas_node_num "$mas_node_num"
+  --mas_prompt "$mas_prompt"
+  --seed "$SEED"
+)
 
 echo "STARTING: job=$SLURM_JOB_ID array_task=$SLURM_ARRAY_TASK_ID node=$(hostname)"
 echo "MODEL: $model"
@@ -121,9 +150,11 @@ echo "MAS_PROMPT: $mas_prompt"
 echo "TASK: $task"
 echo "GENERATE_BS: $generate_bs"
 echo "GPU_MEMORY_UTILIZATION: $gpu_memory_utilization"
-echo "ARGS: $current_args"
+printf 'ARGS:'
+printf ' %q' "${current_args[@]}"
+printf '\n'
 echo "TIME: $(date)"
 
-python -u run.py $current_args
+python -u run.py "${current_args[@]}"
 
 echo "COMPLETED: job=$SLURM_JOB_ID array_task=$SLURM_ARRAY_TASK_ID node=$(hostname) time=$(date)"
