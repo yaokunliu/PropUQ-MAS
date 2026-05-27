@@ -42,7 +42,6 @@ Your answer will be tested on test cases like:
         }
 
 
-# qa data from https://github.com/lupantech/AgentFlow/tree/main
 def load_medqa(split=None, subset=None, cache_dir=None):
 
     ds = load_dataset("json", data_files="./data/medqa.json", split='train')

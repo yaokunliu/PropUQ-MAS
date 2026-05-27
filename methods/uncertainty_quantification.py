@@ -373,16 +373,6 @@ def _all_agent_uncertainties_from_pred(pred: Dict, uq_method: str = "Verb", sour
     return vals
 
 
-def _summarize_uncertainties(values: List[float]):
-    if not values:
-        return {"final": None, "mean": None, "max": None}
-    return {
-        "final": values[-1],
-        "mean": sum(values) / len(values),
-        "max": max(values),
-    }
-
-
 def _auroc(labels: List[int], scores: List[float]):
     n = len(labels)
     if n == 0 or n != len(scores):
@@ -493,23 +483,12 @@ def _uncertainty_to_confidence(
     return None
 
 
-def evaluate_uncertainty_metrics(preds: List[Dict], mode: str = "final", source: str = "local", uq_method: str = "Verb"):
+def evaluate_uncertainty_metrics(preds: List[Dict], source: str = "local", uq_method: str = "Verb"):
     labels: List[int] = []
     probs_correct: List[float] = []
     ranking_scores: List[float] = []
     for pred in preds:
-        if mode == "final":
-            u = _final_uncertainty_from_pred(pred, uq_method=uq_method, source=source)
-        else:
-            all_u = _all_agent_uncertainties_from_pred(pred, uq_method=uq_method, source=source)
-            if not all_u:
-                u = None
-            elif mode == "mean":
-                u = sum(all_u) / len(all_u)
-            elif mode == "max":
-                u = max(all_u)
-            else:
-                raise ValueError(f"Unknown uncertainty mode: {mode}")
+        u = _final_uncertainty_from_pred(pred, uq_method=uq_method, source=source)
         if u is None:
             continue
         confidence = _uncertainty_to_confidence(u, uq_method, source=source)
@@ -526,31 +505,12 @@ def evaluate_uncertainty_metrics(preds: List[Dict], mode: str = "final", source:
     }
 
 
-def _pred_has_metric_uncertainty(pred: Dict, mode: str, source: str, uq_method: str) -> bool:
-    if mode == "final":
-        return _final_uncertainty_from_pred(pred, uq_method=uq_method, source=source) is not None
-
-    all_u = _all_agent_uncertainties_from_pred(pred, uq_method=uq_method, source=source)
-    return len(all_u) > 0
-
-
-def _required_specs_for_complete_case(pred: Dict) -> List[tuple[str, str]]:
-    return [
-        ("final", "local"),
-        ("mean", "local"),
-        ("max", "local"),
-        ("final", "prop"),
-        ("mean", "prop"),
-        ("max", "prop"),
-    ]
-
-
 def _filter_complete_case_preds(preds: List[Dict], uq_method: str) -> List[Dict]:
-
     filtered: List[Dict] = []
     for pred in preds:
-        required_specs = _required_specs_for_complete_case(pred)
-        if all(_pred_has_metric_uncertainty(pred, mode, source, uq_method) for mode, source in required_specs):
+        has_local = _final_uncertainty_from_pred(pred, uq_method=uq_method, source="local") is not None
+        has_prop = _final_uncertainty_from_pred(pred, uq_method=uq_method, source="prop") is not None
+        if has_local and has_prop:
             filtered.append(pred)
     return filtered
 
@@ -569,10 +529,8 @@ def print_posthoc_sample_reports(preds: List[Dict], args):
         agents = pred.get("agents", [])
         print(f"Problem #{idx} Posthoc:")
         for uq_method in _pred_available_uq_methods(pred):
-            local_values = _all_agent_uncertainties_from_pred(pred, uq_method=uq_method, source="local")
-            prop_values = _all_agent_uncertainties_from_pred(pred, uq_method=uq_method, source="prop")
-            local_summary = _summarize_uncertainties(local_values)
-            prop_summary = _summarize_uncertainties(prop_values)
+            local_final = _final_uncertainty_from_pred(pred, uq_method=uq_method, source="local")
+            prop_final = _final_uncertainty_from_pred(pred, uq_method=uq_method, source="prop")
 
             print(f"  UQ Method: {uq_method}")
             if agents:
@@ -584,14 +542,10 @@ def print_posthoc_sample_reports(preds: List[Dict], args):
                         f"Prop={_fmt_unc(_agent_method_field(agent, 'prop_uncertainty', uq_method))}"
                     )
             print(
-                f"  Local-Uncertainty: Final={_fmt_unc(local_summary['final'])} | "
-                f"Mean={_fmt_unc(local_summary['mean'])} | Max={_fmt_unc(local_summary['max'])}"
+                f"  Local-Uncertainty-Final: {_fmt_unc(local_final)}"
             )
             print(
-                "  Prop-Uncertainty: "
-                f"Final={_fmt_unc(prop_summary['final'])} | "
-                f"Mean={_fmt_unc(prop_summary['mean'])} | "
-                f"Max={_fmt_unc(prop_summary['max'])}"
+                f"  Prop-Uncertainty-Final: {_fmt_unc(prop_final)}"
             )
 
 
@@ -624,19 +578,13 @@ def load_preds_jsonl(input_path: Path) -> List[Dict]:
 
 def _build_metrics_summary_for_method(preds: List[Dict], uq_method: str) -> Dict:
     complete_case_preds = _filter_complete_case_preds(preds, uq_method)
-    unc_final = evaluate_uncertainty_metrics(complete_case_preds, mode="final", source="local", uq_method=uq_method)
-    unc_mean = evaluate_uncertainty_metrics(complete_case_preds, mode="mean", source="local", uq_method=uq_method)
-    unc_max = evaluate_uncertainty_metrics(complete_case_preds, mode="max", source="local", uq_method=uq_method)
-    prop_unc_final = evaluate_uncertainty_metrics(complete_case_preds, mode="final", source="prop", uq_method=uq_method)
-    prop_unc_mean = evaluate_uncertainty_metrics(complete_case_preds, mode="mean", source="prop", uq_method=uq_method)
-    prop_unc_max = evaluate_uncertainty_metrics(complete_case_preds, mode="max", source="prop", uq_method=uq_method)
     return {
-        "Local-Uncertainty-Final": unc_final,
-        "Local-Uncertainty-Mean": unc_mean,
-        "Local-Uncertainty-Max": unc_max,
-        "Prop-Uncertainty-Final": prop_unc_final,
-        "Prop-Uncertainty-Mean": prop_unc_mean,
-        "Prop-Uncertainty-Max": prop_unc_max,
+        "Local-Uncertainty-Final": evaluate_uncertainty_metrics(
+            complete_case_preds, source="local", uq_method=uq_method
+        ),
+        "Prop-Uncertainty-Final": evaluate_uncertainty_metrics(
+            complete_case_preds, source="prop", uq_method=uq_method
+        ),
     }
 
 

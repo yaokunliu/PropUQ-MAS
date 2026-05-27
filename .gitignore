@@ -48,8 +48,9 @@ logs_bak/
 test/
 results/
 
-# Dataset files. Keep dataset preparation instructions in README instead.
-data/
+# Dataset files
+data/*
+!data/medqa.json
 
 # Slurm outputs
 slurm-*.out
@@ -60,11 +61,13 @@ slurm-*.err
 *.sbatch.err
 
 # Local notes and manuscripts
+.codex
 note.txt
 *.pdf
 
 # Local one-off launchers
 run.sbatch
+run/test.sbatch
 
 # Hugging Face and model caches
 .cache/
