@@ -6,17 +6,10 @@ from typing import Dict, List, Tuple
 from tqdm import tqdm
 
 from data import (
-    load_aime2024,
-    load_aime2025,
-    load_arc_easy,
-    load_arc_challenge,
     load_gsm8k,
-    load_gpqa_diamond,
     load_mbppplus,
-    load_humanevalplus,
     load_medqa
 )
-from methods.single_agent import SingleAgentMethod
 from methods.mas import MASMethod, MAS_PROMPT_CHOICES, resolve_mas_prompt
 from methods.uncertainty_quantification import (
     apply_posthoc_uncertainty,
@@ -38,57 +31,57 @@ def build_log_root() -> Path:
     return Path(__file__).resolve().parent / "outputs"
 
 
-UNCERTAINTY_MODE_CHOICES = ["ASK4CONF", "MSP", "NLL"]
-LOGIT_UQ_BUNDLE = ["MSP", "NLL"]
-UNCERTAINTY_MODE_BUNDLE_NAME = "LOGIT_UQ_BUNDLE"
-UQ_ADOPTION_MODE_CHOICES = ["original", "all_one"]
+LOCAL_UNCERTAINTY_MODE_CHOICES = ["Verb", "MSP"]
+MODEL_CHOICES = [
+    "Qwen/Qwen3-4B",
+    "Qwen/Qwen3-8B",
+    "Qwen/Qwen3-14B",
+    "google/gemma-3-12b-it",
+]
+TASK_CHOICES = ["gsm8k", "medqa", "mbppplus"]
 
 
-def _normalize_one_uncertainty_mode(value: str | None) -> str:
+def _normalize_one_local_uncertainty_mode(value: str | None) -> str:
     if value is None:
-        return "ASK4CONF"
+        return "Verb"
     normalized = str(value).strip()
-    if not normalized or normalized.lower() == "continuous":
-        return "ASK4CONF"
-    if normalized == UNCERTAINTY_MODE_BUNDLE_NAME:
-        return UNCERTAINTY_MODE_BUNDLE_NAME
-    for choice in UNCERTAINTY_MODE_CHOICES:
+    if not normalized:
+        return "Verb"
+    for choice in LOCAL_UNCERTAINTY_MODE_CHOICES:
         if normalized.lower() == choice.lower():
             return choice
     raise ValueError(f"Unsupported uncertainty mode: {value}")
 
 
-def _normalize_uncertainty_modes(values) -> List[str]:
+def _normalize_local_uncertainty_modes(values) -> List[str]:
     if values is None:
-        return ["ASK4CONF"]
-    mode = _normalize_one_uncertainty_mode(values)
-    if mode == UNCERTAINTY_MODE_BUNDLE_NAME:
-        return list(LOGIT_UQ_BUNDLE)
+        return ["Verb"]
+    mode = _normalize_one_local_uncertainty_mode(values)
     return [mode]
 
 
-def _uses_ask4conf(args: argparse.Namespace) -> bool:
-    return "ASK4CONF" in getattr(args, "uncertainty_modes", ["ASK4CONF"])
+def _uses_verb(args: argparse.Namespace) -> bool:
+    return "Verb" in getattr(args, "local_uncertainty_modes", ["Verb"])
 
 
-def _uncertainty_mode_slug(values) -> str:
+def _local_uncertainty_mode_slug(values) -> str:
     if isinstance(values, list):
         modes = list(values)
     else:
-        modes = _normalize_uncertainty_modes(values)
+        modes = _normalize_local_uncertainty_modes(values)
     return "_" + "_".join(mode.lower().replace(" ", "_") for mode in modes)
 
 
-def _uncertainty_mode_dirname(values) -> str:
+def _local_uncertainty_mode_dirname(values) -> str:
     if isinstance(values, list):
         modes = list(values)
     else:
-        modes = _normalize_uncertainty_modes(values)
+        modes = _normalize_local_uncertainty_modes(values)
     return "_".join(mode.replace(" ", "_") for mode in modes)
 
 
 def _model_output_dir(args: argparse.Namespace) -> Path:
-    root = build_log_root() / _uncertainty_mode_dirname(args.uncertainty_modes)
+    root = build_log_root() / _local_uncertainty_mode_dirname(args.local_uncertainty_modes)
     model_parts = [part for part in str(args.model_name).split("/") if part]
     if not model_parts:
         return root / "unknown_model"
@@ -97,22 +90,8 @@ def _model_output_dir(args: argparse.Namespace) -> Path:
     return root
 
 
-def _normalize_uq_adoption_mode(value: str | None) -> str:
-    if value is None:
-        return "original"
-    normalized = str(value).strip().lower()
-    if normalized in {"", "original"}:
-        return "original"
-    if normalized in {"all_one", "all1"}:
-        return "all_one"
-    raise ValueError(f"Unsupported uq adoption mode: {value}")
-
-
 def _uq_output_dir(args: argparse.Namespace) -> Path:
-    base_dir = _model_output_dir(args) / "uq"
-    if getattr(args, "uq_adoption_mode", "original") == "original":
-        return base_dir
-    return base_dir / args.uq_adoption_mode
+    return _model_output_dir(args) / "uq"
 
 
 def evaluate(preds: List[Dict]) -> Tuple[float, int]:
@@ -124,12 +103,11 @@ def evaluate(preds: List[Dict]) -> Tuple[float, int]:
 
 def _build_cache_stem(args: argparse.Namespace) -> str:
     parts = [
-        args.method,
+        "mas",
         args.task,
-        args.mas_topology if args.method == "mas" else None,
-        f"nodes{args.mas_node_num}" if args.method == "mas" else None,
-        resolve_mas_prompt(args) if args.method == "mas" and resolve_mas_prompt(args) != "norole" else None,
-        f"edges{args.random_edge_count}" if args.method == "mas" and args.mas_topology == "random" and args.random_edge_count is not None else None,
+        args.mas_topology,
+        f"nodes{args.mas_node_num}",
+        resolve_mas_prompt(args) if resolve_mas_prompt(args) != "norole" else None,
         f"seed{args.seed}",
         f"n{args.max_samples}",
     ]
@@ -145,7 +123,6 @@ def _build_graph_cache_stem(args: argparse.Namespace) -> str:
         args.method,
         args.mas_topology,
         f"nodes{args.mas_node_num}",
-        f"edges{args.random_edge_count}" if args.mas_topology == "random" and args.random_edge_count is not None else None,
         f"seed{args.seed}",
     ]
     return "_".join(str(part) for part in parts if part)
@@ -233,18 +210,19 @@ def main():
     parser = argparse.ArgumentParser()
 
     # core args for experiments
-    parser.add_argument("--method", choices=["single_agent", "mas"], required=True,
-                        help="Which method to run: 'single_agent' or 'mas'.")
+    parser.add_argument("--method", choices=["mas"], default="mas",
+                        help="Experiment method. This release implements PropUQ-MAS.")
     parser.add_argument(
         "--model_name",
         type=str,
+        choices=MODEL_CHOICES,
         default="",
-        help="HF model name to use for experiments (e.g. 'Qwen/Qwen3-14B', 'google/gemma-3-12b-it', 'mistralai/Ministral-3-8B-Instruct-2512').",
+        help="HF model name to use for experiments.",
     )
     parser.add_argument("--max_samples", type=int, default=-1, help="Number of questions to evaluate; set -1 to use all samples.")
-    parser.add_argument("--task", choices=["gsm8k", "aime2024", "aime2025", "gpqa", "arc_easy", "arc_challenge", "mbppplus", 'humanevalplus', 'medqa'], default="gsm8k",
+    parser.add_argument("--task", choices=TASK_CHOICES, default="gsm8k",
                         help="Dataset/task to evaluate. Controls which loader is used.")
-    parser.add_argument("--mas_topology", type=str, choices=["chain", "star_convergent", "star_divergent", "tree", "net", "random"], default="chain",
+    parser.add_argument("--mas_topology", type=str, choices=["sequential", "hierarchical", "decentralized"], default="sequential",
                         help="Topology of the MAS graph.")
     parser.add_argument("--mas_node_num", type=int, default=4,
                         help="Number of nodes/agents in the MAS graph.")
@@ -253,13 +231,7 @@ def main():
         type=str,
         choices=list(MAS_PROMPT_CHOICES),
         default="norole",
-        help="MAS prompt style. 'norole' keeps the original generic-agent prompt; 'role' enables role-specific prompts for chain/star_convergent when mas_node_num=4.",
-    )
-    parser.add_argument(
-        "--random_edge_count",
-        type=int,
-        default=None,
-        help="For mas_topology=random only, fix the number of edges. Must satisfy n-1 <= edge_count <= n*(n-1)/2. If omitted, edge count is sampled randomly.",
+        help="MAS prompt style. 'norole' keeps the generic-agent prompt; 'role' enables role-specific prompts for sequential/hierarchical when mas_node_num=4.",
     )
     parser.add_argument(
         "--render_mas_graph_svg",
@@ -275,20 +247,11 @@ def main():
     parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--generate_bs", type=int, default=16, help="Batch size for generation")
     parser.add_argument(
-        "--uncertainty_mode",
+        "--local_uncertainty_mode",
         type=str,
-        choices=UNCERTAINTY_MODE_CHOICES + [UNCERTAINTY_MODE_BUNDLE_NAME],
+        choices=LOCAL_UNCERTAINTY_MODE_CHOICES,
         default=None,
-        help="Choose exactly one of ASK4CONF, MSP, NLL, or "
-             f"{UNCERTAINTY_MODE_BUNDLE_NAME}. {UNCERTAINTY_MODE_BUNDLE_NAME} runs both MSP and NLL.",
-    )
-    parser.add_argument(
-        "--uq_adoption_mode",
-        type=str,
-        choices=UQ_ADOPTION_MODE_CHOICES,
-        default="original",
-        help="Posthoc MAS adoption mode for formula/hazard/system UQ. "
-             "'original' uses recorded message adoption; 'all_one' forces every incoming adoption score to 1.",
+        help="Choose exactly one of Verb or MSP.",
     )
     parser.add_argument("--mas_context_length", type=int, default=-1, help="MAS context length limit; <=0 means no truncation")
     parser.add_argument(
@@ -331,50 +294,43 @@ def main():
     if not args.prepare_mas_graph_only and not args.model_name:
         parser.error("--model_name is required unless --prepare_mas_graph_only is set.")
     try:
-        args.uncertainty_modes = _normalize_uncertainty_modes(args.uncertainty_mode)
+        args.local_uncertainty_modes = _normalize_local_uncertainty_modes(args.local_uncertainty_mode)
     except ValueError as exc:
         parser.error(str(exc))
-    try:
-        args.uq_adoption_mode = _normalize_uq_adoption_mode(args.uq_adoption_mode)
-    except ValueError as exc:
-        parser.error(str(exc))
-    args.uncertainty_mode = args.uncertainty_mode or "ASK4CONF"
-    args.enable_uncertainty_explanation = _uses_ask4conf(args)
+    args.local_uncertainty_mode = args.local_uncertainty_mode or "Verb"
+    args.enable_uncertainty_explanation = _uses_verb(args)
     args.enable_peer_influence = True
-    args.resolved_mas_prompt = resolve_mas_prompt(args) if args.method == "mas" else "norole"
+    args.resolved_mas_prompt = resolve_mas_prompt(args)
     raw_preds_path = build_default_raw_preds_path(args)
-    if args.method == "mas":
-        if args.mas_prompt != "norole":
-            print(
-                "MAS prompt requested: "
-                f"{args.mas_prompt} | resolved: {args.resolved_mas_prompt}"
-            )
-        mas_graph = build_mas_graph(
-            args.mas_topology,
-            args.mas_node_num,
-            seed=args.seed,
-            random_edge_count=args.random_edge_count,
+    if args.mas_prompt != "norole":
+        print(
+            "MAS prompt requested: "
+            f"{args.mas_prompt} | resolved: {args.resolved_mas_prompt}"
         )
-        graph_output_dir = build_log_root() / "mas_graphs" / _build_graph_cache_stem(args)
-        graph_artifacts = export_mas_graph_artifacts(
-            mas_graph,
-            graph_output_dir,
-            render_svg=args.render_mas_graph_svg,
-        )
-        print(f"MAS graph: {mas_graph.edge_strings()}")
-        print(f"MAS graph density: {mas_graph.density():.6f}")
-        if graph_artifacts["reused_existing"]:
-            print(f"Reused MAS graph artifacts from: {graph_output_dir}")
-        if graph_artifacts["svg"] is not None:
-            print(f"MAS graph SVG saved to: {graph_artifacts['svg']}")
-            print(f"MAS graph DOT saved to: {graph_artifacts['dot']}")
-        else:
-            print(f"Warning: skipped MAS graph SVG export. {graph_artifacts['svg_warning']}")
-        print(f"MAS message-passing info saved to: {graph_artifacts['text']}")
-        print(f"MAS graph JSON saved to: {graph_artifacts['json']}")
-        if args.prepare_mas_graph_only:
-            print("Prepared MAS graph artifacts only. Exiting before experiment execution.")
-            return
+    mas_graph = build_mas_graph(
+        args.mas_topology,
+        args.mas_node_num,
+    )
+    graph_output_dir = build_log_root() / "mas_graphs" / _build_graph_cache_stem(args)
+    graph_artifacts = export_mas_graph_artifacts(
+        mas_graph,
+        graph_output_dir,
+        render_svg=args.render_mas_graph_svg,
+    )
+    print(f"MAS graph: {mas_graph.edge_strings()}")
+    print(f"MAS graph density: {mas_graph.density():.6f}")
+    if graph_artifacts["reused_existing"]:
+        print(f"Reused MAS graph artifacts from: {graph_output_dir}")
+    if graph_artifacts["svg"] is not None:
+        print(f"MAS graph SVG saved to: {graph_artifacts['svg']}")
+        print(f"MAS graph DOT saved to: {graph_artifacts['dot']}")
+    else:
+        print(f"Warning: skipped MAS graph SVG export. {graph_artifacts['svg_warning']}")
+    print(f"MAS message-passing info saved to: {graph_artifacts['text']}")
+    print(f"MAS graph JSON saved to: {graph_artifacts['json']}")
+    if args.prepare_mas_graph_only:
+        print("Prepared MAS graph artifacts only. Exiting before experiment execution.")
+        return
 
     generated_this_run = False
     start_time = time.time()
@@ -392,23 +348,13 @@ def main():
             top_p=args.top_p,
         )
 
-        if args.method == "single_agent":
-            method = SingleAgentMethod(
-                model,
-                max_new_tokens=args.max_new_tokens,
-                **common_kwargs,
-                generate_bs=args.generate_bs,
-                use_vllm=args.use_vllm,
-                args=args
-            )
-        elif args.method == "mas":
-            method = MASMethod(
-                model,
-                max_new_tokens_each=args.max_new_tokens,
-                **common_kwargs,
-                generate_bs=args.generate_bs,
-                args=args,
-            )
+        method = MASMethod(
+            model,
+            max_new_tokens_each=args.max_new_tokens,
+            **common_kwargs,
+            generate_bs=args.generate_bs,
+            args=args,
+        )
 
         processed = 0
         correct = 0
@@ -418,20 +364,8 @@ def main():
 
         if args.task == "gsm8k":
             dataset_iter = load_gsm8k(split=args.split)
-        elif args.task == "aime2024":
-            dataset_iter = load_aime2024(split="train")
-        elif args.task == "aime2025":
-            dataset_iter = load_aime2025(split='train')
-        elif args.task == "gpqa":
-            dataset_iter = load_gpqa_diamond(split='test')
-        elif args.task == "arc_easy":
-            dataset_iter = load_arc_easy(split='test')
-        elif args.task == "arc_challenge":
-            dataset_iter = load_arc_challenge(split='test')
         elif args.task == "mbppplus":
             dataset_iter = load_mbppplus(split='test')
-        elif args.task == "humanevalplus":
-            dataset_iter = load_humanevalplus(split='test')
         elif args.task == "medqa":
             dataset_iter = load_medqa(split='test')
         else:
@@ -503,7 +437,7 @@ def main():
             uq_preds_path = uq_base_dir / f"uq_preds_{_build_uq_cache_stem(args)}.jsonl"
             uq_metrics_path = uq_base_dir / f"uq_metrics_{_build_uq_cache_stem(args)}.json"
 
-        preds = apply_posthoc_uncertainty(preds, method=args.method, adoption_mode=args.uq_adoption_mode)
+        preds = apply_posthoc_uncertainty(preds, method=args.method)
         print_posthoc_sample_reports(preds, args)
         uq_metrics = build_uncertainty_metrics_summary(preds)
         export_preds_jsonl(preds, uq_preds_path)
@@ -511,19 +445,18 @@ def main():
             uq_metrics,
             uq_metrics_path,
             metadata={
-                "method": args.method,
+                "method": "mas",
                 "model": args.model_name,
                 "split": args.split,
                 "seed": args.seed,
                 "max_samples": args.max_samples,
                 "task": args.task,
-                "mas_topology": args.mas_topology if args.method == "mas" else None,
-                "mas_node_num": args.mas_node_num if args.method == "mas" else None,
-                "mas_prompt": getattr(args, "mas_prompt", "norole") if args.method == "mas" else None,
-                "resolved_mas_prompt": getattr(args, "resolved_mas_prompt", "norole") if args.method == "mas" else None,
-                "uncertainty_mode": args.uncertainty_modes[0] if len(args.uncertainty_modes) == 1 else None,
-                "uncertainty_modes": args.uncertainty_modes,
-                "uq_adoption_mode": args.uq_adoption_mode,
+                "mas_topology": args.mas_topology,
+                "mas_node_num": args.mas_node_num,
+                "mas_prompt": getattr(args, "mas_prompt", "norole"),
+                "resolved_mas_prompt": getattr(args, "resolved_mas_prompt", "norole"),
+                "local_uncertainty_mode": args.local_uncertainty_modes[0] if len(args.local_uncertainty_modes) == 1 else None,
+                "local_uncertainty_modes": args.local_uncertainty_modes,
                 "accuracy": acc,
                 "correct": correct,
                 "total_time_sec": round(total_time, 4),

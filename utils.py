@@ -119,28 +119,22 @@ def extract_markdown_python_block(text: str) -> Optional[str]:
 
 def strip_structured_uncertainty_blocks(text: str) -> str:
     out = re.sub(
-        r"<agent_uncertainty\b[^>]*>.*?</agent_uncertainty>",
+        r"<local_uncertainty\b[^>]*>.*?</local_uncertainty>",
         "",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    out = re.sub(r"<agent_uncertainty\b[^>]*/>", "", out, flags=re.IGNORECASE)
-    out = re.sub(r"<peer_influence\b[^>]*/>", "", out, flags=re.IGNORECASE)
-    out = re.sub(r"<message_uncertainty\b[^>]*/>", "", out, flags=re.IGNORECASE)
-    out = re.sub(r"<message_adoption\b[^>]*/>", "", out, flags=re.IGNORECASE)
-    # Backward compatibility: also strip legacy confidence tags.
-    out = re.sub(r"<agent_confidence\b[^>]*>.*?</agent_confidence>", "", out, flags=re.IGNORECASE | re.DOTALL)
-    out = re.sub(r"<agent_confidence\b[^>]*/>", "", out, flags=re.IGNORECASE)
-    out = re.sub(r"<message_confidence\b[^>]*/>", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"<local_uncertainty\b[^>]*/>", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"<alpha\b[^>]*/>", "", out, flags=re.IGNORECASE)
 
     # Plain-text fallback formats.
     out = re.sub(
-        r"(?im)^[ \t>*`-]*(?:agent'?s?\s+uncertainty|self[_\s-]*uncertainty|message\s+adoption)\s*[:=]\s*[^\n\r]*$",
+        r"(?im)^[ \t>*`-]*(?:local[_\s-]*uncertainty|alpha)\s*[:=]\s*[^\n\r]*$",
         "",
         out,
     )
     out = re.sub(
-        r"(?im)^[ \t>*`-]*message[_\s-]*adoption[_\s-]*weight\s*[:=]\s*[^\n\r]*$",
+        r"(?im)^[ \t>*`-]*alpha[_\s-]*weight\s*[:=]\s*[^\n\r]*$",
         "",
         out,
     )

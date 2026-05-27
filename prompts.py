@@ -10,8 +10,6 @@ def _system_message_for_model(args) -> str:
         return "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
     if "gemma" in model_name:
         return "You are Gemma, created by Google. You are a helpful assistant."
-    if "ministral" in model_name or "mistral" in model_name:
-        return "You are Ministral, created by Mistral AI. You are a helpful assistant."
     return "You are a helpful assistant."
 
 
@@ -28,12 +26,12 @@ def _answer_format_reminder(args, *, role: str = "", mas_style: str = "") -> str
         if role == "refiner":
             return "Follow the refiner format above and output the refined plan first."
         if role == "judger":
-            if task in ["mbppplus", "humanevalplus"]:
+            if task == "mbppplus":
                 return "Follow the solver format above and output the final solution first as markdown python code block(s)."
             return "Follow the solver format above and output the final answer first in the exact required format (including \\boxed{...} when required)."
 
     if mas_style == "hierarchical":
-        if task in ["mbppplus", "humanevalplus"]:
+        if task == "mbppplus":
             if role == "judger":
                 return "Follow the Task Summarizer format above and output the final answer first as markdown python code block(s)."
             return "Follow the resposnse format above and output your response first as markdown python code block(s)."
@@ -42,7 +40,7 @@ def _answer_format_reminder(args, *, role: str = "", mas_style: str = "") -> str
         if role in ["planner", "critic", "refiner"]:
             return "Follow the resposnse format above and output your response first in the exact required format (including \\boxed{...} when required)."
 
-    if task in ["mbppplus", "humanevalplus"]:
+    if task == "mbppplus":
         return (
             "Output the required solution first as markdown python code block(s). "
         )
@@ -52,20 +50,16 @@ def _answer_format_reminder(args, *, role: str = "", mas_style: str = "") -> str
     )
 
 
-def _uses_ask4conf(args) -> bool:
-    return "ASK4CONF" in _selected_uq_methods(args)
-
-
-def _uses_nll(args) -> bool:
-    return "NLL" in _selected_uq_methods(args)
+def _uses_verb(args) -> bool:
+    return "Verb" in _selected_uq_methods(args)
 
 
 def _selected_uq_methods(args) -> list[str]:
     if args is None:
         return []
-    value = getattr(args, "uncertainty_modes", getattr(args, "uncertainty_mode", None))
+    value = getattr(args, "local_uncertainty_modes", getattr(args, "local_uncertainty_mode", None))
     if value is None:
-        return ["ASK4CONF"]
+        return ["Verb"]
     if isinstance(value, str):
         values = [value]
     else:
@@ -75,51 +69,48 @@ def _selected_uq_methods(args) -> list[str]:
         text = str(item).strip()
         if not text:
             continue
-        if text.lower() == "continuous":
-            text = "ASK4CONF"
         if text not in out:
             out.append(text)
-    return out or ["ASK4CONF"]
+    return out or ["Verb"]
 
 
 def _build_uncertainty_instruction(
     args,
     *,
-    allow_message_adoption: bool,
+    allow_alpha: bool,
     role: str = "",
     mas_style: str = "",
 ) -> str:
     if args is None:
         return ""
-    use_ask4conf = _uses_ask4conf(args)
-    use_nll = _uses_nll(args)
-    use_message_adoption = allow_message_adoption and (use_ask4conf or use_nll)
-    if not use_ask4conf and not use_message_adoption:
+    use_verb = _uses_verb(args)
+    use_alpha = allow_alpha and use_verb
+    if not use_verb and not use_alpha:
         return ""
     lines = [""]
-    if use_ask4conf:
+    if use_verb:
         lines.append("After providing your response according to the requirements, report the following values as numbers in the range [0,1]:")
-        lines.append("- Report your own self_uncertainty (self_uncertainty indicates the probability that your current answer or action may be wrong.)")
-    elif use_message_adoption:
-        lines.append("After providing your response according to the requirements, report message_adoption_weight only. Do not report self_uncertainty.")
-    if use_message_adoption:
+        lines.append("- Report your own local_uncertainty (local_uncertainty indicates the probability that your current answer or action may be wrong.)")
+    elif use_alpha:
+        lines.append("After providing your response according to the requirements, report alpha only. Do not report local_uncertainty.")
+    if use_alpha:
         lines.append(
-            "- Report your message_adoption_weight (message_adoption_weight indicates the percentage to which you agree with an incoming message in your current step. A higher value means you largely follow its requirements or content, while a lower value means you rely less on it and instead critique, verify, filter, or only partially use it.)"
+            "- Report alpha for each incoming message in your current step. A higher alpha means you largely accept or reuse that message, while a lower alpha means you critique, revise, reject, or only weakly rely on it."
         )
-        lines.append(_build_message_adoption_guidance(args=args, role=role, mas_style=mas_style))
+        lines.append(_build_alpha_guidance(args=args, role=role, mas_style=mas_style))
     lines.extend(["", "## After the answer, you MUST append (one line per item):"])
-    if use_ask4conf:
-        lines.append("<agent_uncertainty score=\"FLOAT_0_TO_1\"/>")
-    if use_message_adoption:
-        for target in _message_adoption_targets(role=role, mas_style=mas_style):
+    if use_verb:
+        lines.append("<local_uncertainty score=\"FLOAT_0_TO_1\"/>")
+    if use_alpha:
+        for target in _alpha_targets(role=role, mas_style=mas_style):
             lines.append(
-                f"<message_adoption agent=\"{target}\" score=\"FLOAT_0_TO_1\"/>"
+                f"<alpha agent=\"{target}\" score=\"FLOAT_0_TO_1\"/>"
             )
 
     return "\n".join(lines)
 
 
-def _message_adoption_targets(*, role: str = "", mas_style: str = ""):
+def _alpha_targets(*, role: str = "", mas_style: str = ""):
     role = (role or "").lower()
     mas_style = (mas_style or "").lower()
 
@@ -137,84 +128,81 @@ def _message_adoption_targets(*, role: str = "", mas_style: str = ""):
     return []
 
 
-def _build_message_adoption_guidance(*, args, role: str = "", mas_style: str = "") -> str:
+def _build_alpha_guidance(*, args, role: str = "", mas_style: str = "") -> str:
     if args is None:
         return ""
 
-    targets = _message_adoption_targets(role=role, mas_style=mas_style)
+    targets = _alpha_targets(role=role, mas_style=mas_style)
     if not targets:
         return ""
 
     if len(targets) == 1:
-        return f"Score the message_adoption_weight for the message from {targets[0]}."
+        return f"Score alpha for the message from {targets[0]}."
 
     if len(targets) == 2:
         target_text = f"{targets[0]} and {targets[1]}"
     else:
         target_text = ", ".join(targets[:-1]) + f", and {targets[-1]}"
-    return f"Score the message_adoption_weight for messages from {target_text}."
+    return f"Score alpha for messages from {target_text}."
 
 
-def _build_message_adoption_guidance_for_targets(targets) -> str:
+def _build_alpha_guidance_for_targets(targets) -> str:
     targets = [str(target).strip() for target in (targets or []) if str(target).strip()]
     if not targets:
         return ""
     if len(targets) == 1:
-        return f"Score the message_adoption_weight for the message from {targets[0]}."
+        return f"Score alpha for the message from {targets[0]}."
     if len(targets) == 2:
-        return f"Score the message_adoption_weight for messages from {targets[0]} and {targets[1]}."
-    return f"Score the message_adoption_weight for messages from {', '.join(targets[:-1])}, and {targets[-1]}."
+        return f"Score alpha for messages from {targets[0]} and {targets[1]}."
+    return f"Score alpha for messages from {', '.join(targets[:-1])}, and {targets[-1]}."
 
 
-def _build_uncertainty_instruction_for_targets(args, *, adoption_targets=None) -> str:
+def _build_uncertainty_instruction_for_targets(args, *, alpha_targets=None) -> str:
     if args is None:
         return ""
-    use_ask4conf = _uses_ask4conf(args)
-    use_nll = _uses_nll(args)
-    adoption_targets = [str(target).strip() for target in (adoption_targets or []) if str(target).strip()]
-    use_message_adoption = bool(adoption_targets) and (use_ask4conf or use_nll)
-    if not use_ask4conf and not use_message_adoption:
+    use_verb = _uses_verb(args)
+    alpha_targets = [str(target).strip() for target in (alpha_targets or []) if str(target).strip()]
+    use_alpha = bool(alpha_targets) and use_verb
+    if not use_verb and not use_alpha:
         return ""
 
     lines = [""]
-    if use_ask4conf:
+    if use_verb:
         lines.append("After providing your response according to the requirements, report the following values as numbers in the range [0,1]:")
-        lines.append("- Report your own self_uncertainty (self_uncertainty indicates the probability that your current answer or action may be wrong.)")
-    elif use_message_adoption:
-        lines.append("After providing your response according to the requirements, report message_adoption_weight only. Do not report self_uncertainty.")
-    if use_message_adoption:
-        lines.append("- Report one message_adoption_weight for each directly connected incoming agent whose answer was provided to you.")
-        lines.append(_build_message_adoption_guidance_for_targets(adoption_targets))
+        lines.append("- Report your own local_uncertainty (local_uncertainty indicates the probability that your current answer or action may be wrong.)")
+    elif use_alpha:
+        lines.append("After providing your response according to the requirements, report alpha only. Do not report local_uncertainty.")
+    if use_alpha:
+        lines.append("- Report one alpha for each directly connected incoming agent whose answer was provided to you.")
+        lines.append(_build_alpha_guidance_for_targets(alpha_targets))
     lines.extend(["", "## After the answer, you MUST append (one line per item):"])
-    if use_ask4conf:
-        lines.append("<agent_uncertainty score=\"FLOAT_0_TO_1\"/>")
-    if use_message_adoption:
-        for target in adoption_targets:
-            lines.append(f"<message_adoption agent=\"{target}\" score=\"FLOAT_0_TO_1\"/>")
+    if use_verb:
+        lines.append("<local_uncertainty score=\"FLOAT_0_TO_1\"/>")
+    if use_alpha:
+        for target in alpha_targets:
+            lines.append(f"<alpha agent=\"{target}\" score=\"FLOAT_0_TO_1\"/>")
     return "\n".join(lines)
 
 
 def _task_answer_instruction(args) -> str:
     task = getattr(args, "task", None) if args is not None else None
-    if task in ["mbppplus", "humanevalplus"]:
+    if task == "mbppplus":
         return (
             "Your answer must be self-contained Python function(s) in markdown code block(s). "
             "Do not put feedback inside code blocks."
         )
-    if task in ["gsm8k", "aime2024", "aime2025"]:
+    if task == "gsm8k":
         return "Your final answer must appear inside \\boxed{YOUR_FINAL_ANSWER}."
-    if task in ["arc_easy", "arc_challenge", "gpqa", "medqa"]:
+    if task == "medqa":
         return "Your final answer must be selected from A, B, C, D and appear inside \\boxed{YOUR_FINAL_ANSWER}."
-    if task in ["winogrande"]:
-        return "Your final answer must be selected from 1 or 2 and appear inside \\boxed{YOUR_FINAL_ANSWER}."
     return "Present a clear final answer at the end of your response."
 
 
 def _task_answer_placeholder(args) -> str:
     task = getattr(args, "task", None) if args is not None else None
-    if task in ["mbppplus", "humanevalplus"]:
+    if task == "mbppplus":
         return "```python\nYOUR_PYTHON_CODE\n```"
-    if task in ["gsm8k", "aime2024", "aime2025", "arc_easy", "arc_challenge", "gpqa", "medqa", "winogrande"]:
+    if task in ["gsm8k", "medqa"]:
         return "\\boxed{YOUR_FINAL_ANSWER}"
     return "[Your own answer here]"
 
@@ -283,7 +271,7 @@ Now, output your response below.
 
     user_content = _attach_uncertainty_instruction(
         user_content,
-        _build_uncertainty_instruction_for_targets(args, adoption_targets=incoming_agents),
+        _build_uncertainty_instruction_for_targets(args, alpha_targets=incoming_agents),
     )
     return [
         {"role": "system", "content": system_message},
@@ -436,7 +424,7 @@ Now, output your refined plan below.
     elif role == "judger":
         task = getattr(args, "task", None)
 
-        if task in ["gsm8k", "aime2024", "aime2025"]:
+        if task == "gsm8k":
             user_content = f"""
 Target Question: {question}
 
@@ -453,7 +441,7 @@ You must reason step-by-step to solve the **provided Target Question** without o
 Now, reason step by step and output the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
 """
 
-        elif task in ["arc_easy", "arc_challenge", "gpqa", "medqa"]:
+        elif task == "medqa":
             user_content = f"""
 Target Question: {question}
 
@@ -471,7 +459,7 @@ Your final answer must be selected from A,B,C,D. For example \\boxed{{A}}. Do no
 Now, reason step by step and output the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
 """
 
-        elif task in ["mbppplus", "humanevalplus"]:
+        elif task == "mbppplus":
             user_content = f"""
 Target Question: {question}
 
@@ -493,23 +481,6 @@ def add(a, b):
 Do not add any other contents inside the markdown code block.
 """
             
-        elif task in ["winogrande"]:
-            user_content = f"""
-Target Question: {question}
-
-You are the final solver agent in a sequential multi-agent system (planner -> critic -> refiner -> solver).
-You are provided with the Refiner Agent's plan as reference.
-
-Refined Plan from Previous Agents:
-{ctx}
-
-The plan might contain irrelevant or incorrect contents. Ignore them if they are not helpful for solving the target question.
-
-You must reason step-by-step to solve the **provided Target Question** without outputting other irrelevant information.
-Your final answer must be selected from 1 and 2. For example \\boxed{{1}} or \\boxed{{2}}. Do not add any other contents inside the box.
-
-Now, reason step by step and output the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
-"""
     else:
         user_content = f"""
 Target Question: {question}
@@ -530,7 +501,7 @@ Now, reason step by step and present your final answer clearly at the end.
     user_content = _attach_uncertainty_instruction(
         user_content,
         _build_uncertainty_instruction(
-            args, allow_message_adoption=(role != "planner"), role=role, mas_style="sequential"
+            args, allow_alpha=(role != "planner"), role=role, mas_style="sequential"
         ),
     )
 
@@ -546,7 +517,7 @@ def build_agent_messages_hierarchical_text_mas(role: str, question: str, context
     
     assert method in ["mas"], "this prompt only for mas method"
     
-    if args.task in ['gsm8k', 'aime2024', 'aime2025']:
+    if args.task == "gsm8k":
         if role == "planner":
             user_content = f"""
 You are a math agent. Given the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
@@ -585,7 +556,7 @@ Content from Previous Agent:
 Give your response below.
 """
 
-    elif args.task in ["arc_easy", "arc_challenge", "gpqa", "medqa"]:
+    elif args.task == "medqa":
         if role == "planner":
             user_content = f"""
 You are a math agent. Given the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
@@ -625,7 +596,7 @@ Content from Previous Agent:
 Give your response below.
 """
 
-    elif args.task in ["mbppplus", "humanevalplus"]:
+    elif args.task == "mbppplus":
         
         if role == "planner":
             user_content = f"""
@@ -672,134 +643,10 @@ Content from Previous Agent:
 Give your response below.
 """
 
-    elif args.task in ["winogrande"]:
-        if role == "planner":
-            user_content = f"""
-You are a math agent. Given the input question, reason step-by-step and put the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
-"Your final answer must be selected from 1 and 2. For example \\boxed{{1}} or \\boxed{{2}}. Do not add any other contents inside the box."
-
-Input Question: {question}
-
-Give your response below.
-"""
-    
-        elif role == "critic":
-            user_content = f"""
-You are a science agent. Given the input question, reason step-by-step and put the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
-"Your final answer must be selected from 1 and 2. For example \\boxed{{1}} or \\boxed{{2}}. Do not add any other contents inside the box."
-
-Input Question: {question}     
-
-Give your response below.
-"""
-    
-        elif role == "refiner":
-            user_content = f"""
-You are a code agent. Given the input question, reason step-by-step and put the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
-"Your final answer must be selected from 1 and 2. For example \\boxed{{1}} or \\boxed{{2}}. Do not add any other contents inside the box."
-
-Input Question: {question}
-
-Give your response below.       
-"""
-        elif role == "judger":
-            user_content = f"""
-You are a task summarizer. Given the input question and responses from previous agents as reference, reason step-by-step and put the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
-
-Input Question: {question}
-
-Content from Previous Agent:
-{_truncate_context(context, args.mas_context_length)}
-
-"Your final answer must be selected from 1 and 2. For example \\boxed{{1}} or \\boxed{{2}}. Do not add any other contents inside the box."
-
-Give your response below.
-"""
-
     user_content = _attach_uncertainty_instruction(
         user_content,
         _build_uncertainty_instruction(
-            args, allow_message_adoption=(role == "judger"), role=role, mas_style="hierarchical"
-        ),
-    )
-
-    return [
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": user_content},
-    ]
-
-
-def build_agent_messages_single_agent(question: str, args=None):
-
-    system_message = _system_message_for_model(args)
-
-    assert args.method in ["single_agent"], "this prompt only for single_agent method"
-
-    task = args.task
-
-    if task in ["gsm8k", "aime2024", "aime2025"]:
-        user_content = f"""
-Target Question: {question}
-
-You are a helpful assistant.
-
-You must reason step-by-step to solve the **provided Target Question** without outputting other irrelevant information.
-
-Now, reason step by step and output the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
-"""
-
-    elif task in ["arc_easy", "arc_challenge", "gpqa", "medqa"]:
-        user_content = f"""
-Target Question: {question}
-
-You are a helpful assistant.
-
-You must reason step-by-step to solve the **provided Target Question** without outputting other irrelevant information.
-Your final answer must be selected from A,B,C,D. For example \\boxed{{A}}. Do not add any other contents inside the box.
-
-Now, reason step by step and output the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
-"""
-
-    elif task in ["mbppplus", "humanevalplus"]:
-        user_content = f"""
-Target Question: {question}
-
-You must put all python code as self-contained Python function(s) in markdown code blocks. For example:
-```python
-import math
-def add(a, b):
-    return a + b
-```
-Do not add any other contents inside the markdown code block.
-Now, reason step by step and output the final answer:
-"""
-
-    elif task in ["winogrande"]:
-        user_content = f"""
-Target Question: {question}
-
-You are a helpful assistant.
-
-You must reason step-by-step to solve the **provided Target Question** without outputting other irrelevant information.
-Your final answer must be selected from 1 and 2. For example \\boxed{{1}} or \\boxed{{2}}. Do not add any other contents inside the box.
-
-Now, reason step by step and output the final answer inside \\boxed{{YOUR_FINAL_ANSWER}}.
-"""
-
-    else:
-        user_content = f"""
-Question: {question}
-
-You are a helpful assistant.
-
-You must reason step-by-step to solve the question without outputting other irrelevant information.
-Present your reasoning, and then clearly state your final answer at the end.
-"""
-
-    user_content = _attach_uncertainty_instruction(
-        user_content,
-        _build_uncertainty_instruction(
-            args, allow_message_adoption=False, role="singleagent", mas_style="single"
+            args, allow_alpha=(role == "judger"), role=role, mas_style="hierarchical"
         ),
     )
 
@@ -812,7 +659,6 @@ Present your reasoning, and then clearly state your final answer at the end.
 def build_agent_messages_sequential_text_mas_gemma(
     role: str, question: str, context: str = "", method=None, args=None
 ):
-    # Alias to keep compatibility with existing imports/routes.
     return build_agent_messages_sequential_text_mas(
         role=role, question=question, context=context, method=method, args=args
     )
@@ -821,12 +667,6 @@ def build_agent_messages_sequential_text_mas_gemma(
 def build_agent_messages_hierarchical_text_mas_gemma(
     role: str, question: str, context: str = "", method=None, args=None
 ):
-    # Alias to keep compatibility with existing imports/routes.
     return build_agent_messages_hierarchical_text_mas(
         role=role, question=question, context=context, method=method, args=args
     )
-
-
-def build_agent_messages_single_agent_gemma(question: str, args=None):
-    # Alias to keep compatibility with existing imports/routes.
-    return build_agent_messages_single_agent(question=question, args=args)

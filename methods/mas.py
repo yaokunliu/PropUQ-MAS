@@ -21,16 +21,16 @@ from utils import (
     strip_structured_uncertainty_blocks,
 )
 
-LOGIT_UQ_METHODS = ("MSP", "NLL")
+LOGIT_UQ_METHODS = ("MSP",)
 MAS_PROMPT_CHOICES = ("norole", "role")
 
-_LEGACY_CHAIN_AGENT_SPECS = (
+_SEQUENTIAL_AGENT_SPECS = (
     {"name": "Planner", "role": "planner", "context_label": "Planner", "prompt_label": "Planner Agent"},
     {"name": "Critic", "role": "critic", "context_label": "Critic", "prompt_label": "Critic Agent"},
     {"name": "Refiner", "role": "refiner", "context_label": "Refiner", "prompt_label": "Refiner Agent"},
     {"name": "Judger", "role": "judger", "context_label": "Judger", "prompt_label": "Judger Agent"},
 )
-_LEGACY_HIERARCHICAL_AGENT_SPECS = (
+_HIERARCHICAL_AGENT_SPECS = (
     {"name": "Planner", "role": "planner", "context_label": "Math Agent", "prompt_label": "Math Agent"},
     {"name": "Critic", "role": "critic", "context_label": "Science Agent", "prompt_label": "Science Agent"},
     {"name": "Refiner", "role": "refiner", "context_label": "Code Agent", "prompt_label": "Code Agent"},
@@ -39,9 +39,9 @@ _LEGACY_HIERARCHICAL_AGENT_SPECS = (
 
 
 def _selected_uq_methods(args) -> List[str]:
-    value = getattr(args, "uncertainty_modes", getattr(args, "uncertainty_mode", None))
+    value = getattr(args, "local_uncertainty_modes", getattr(args, "local_uncertainty_mode", None))
     if value is None:
-        return ["ASK4CONF"]
+        return ["Verb"]
     if isinstance(value, str):
         values = [value]
     else:
@@ -51,11 +51,9 @@ def _selected_uq_methods(args) -> List[str]:
         text = str(item).strip()
         if not text:
             continue
-        if text.lower() == "continuous":
-            text = "ASK4CONF"
         if text not in out:
             out.append(text)
-    return out or ["ASK4CONF"]
+    return out or ["Verb"]
 
 
 def _uses_logit_uq(args) -> bool:
@@ -69,9 +67,9 @@ def resolve_mas_prompt_mode(args) -> str:
     if getattr(args, "mas_node_num", None) != 4:
         return "graph"
     topology = str(getattr(args, "mas_topology", "") or "").strip().lower()
-    if topology == "chain":
+    if topology == "sequential":
         return "legacy_sequential"
-    if topology == "star_convergent":
+    if topology == "hierarchical":
         return "legacy_hierarchical"
     return "graph"
 
@@ -82,9 +80,9 @@ def resolve_mas_prompt(args) -> str:
 
 def _legacy_agent_specs_for_mode(prompt_mode: str):
     if prompt_mode == "legacy_sequential":
-        return _LEGACY_CHAIN_AGENT_SPECS
+        return _SEQUENTIAL_AGENT_SPECS
     if prompt_mode == "legacy_hierarchical":
-        return _LEGACY_HIERARCHICAL_AGENT_SPECS
+        return _HIERARCHICAL_AGENT_SPECS
     return None
 
 
@@ -111,8 +109,6 @@ class MASMethod:
         self.graph = build_mas_graph(
             args.mas_topology,
             args.mas_node_num,
-            seed=args.seed,
-            random_edge_count=getattr(args, "random_edge_count", None),
         )
         legacy_specs = _legacy_agent_specs_for_mode(self.prompt_mode)
         if legacy_specs is None:
@@ -131,9 +127,6 @@ class MASMethod:
                 idx: spec["prompt_label"] for idx, spec in enumerate(legacy_specs)
             }
 
-    def _is_star_divergent(self) -> bool:
-        return self.graph.topology == "star_divergent"
-
     def _is_legacy_prompt_mode(self) -> bool:
         return self.prompt_mode in {"legacy_sequential", "legacy_hierarchical"}
 
@@ -150,37 +143,29 @@ class MASMethod:
         return max(0.0, min(1.0, float(value)))
 
     @classmethod
-    def _extract_agent_uncertainty(
+    def _extract_local_uncertainty(
         cls,
         text: str,
     ) -> Optional[float]:
         if not text:
             return None
 
-        for match in re.finditer(r"<agent_uncertainty\b([^>]*)/?>", text, flags=re.IGNORECASE):
+        for match in re.finditer(r"<local_uncertainty\b([^>]*)/?>", text, flags=re.IGNORECASE):
             attrs = match.group(1)
             score_match = re.search(r'\bscore="([01](?:\.\d+)?|0?\.\d+)"', attrs, flags=re.IGNORECASE)
             if score_match:
                 return cls._clamp01(float(score_match.group(1)))
 
         score_match = re.search(
-            r"(?im)^\s*(?:agent'?s?\s+uncertainty|self[_\s-]*uncertainty)\s*[:=]\s*([01](?:\.\d+)?|0?\.\d+)\s*$",
+            r"(?im)^\s*local[_\s-]*uncertainty\s*[:=]\s*([01](?:\.\d+)?|0?\.\d+)\s*$",
             text,
         )
         if score_match:
             return cls._clamp01(float(score_match.group(1)))
-
-        confidence_match = re.search(
-            r'<agent_confidence\s+score="([01](?:\.\d+)?|0?\.\d+)"\s*(?:/>|>)',
-            text,
-            flags=re.IGNORECASE,
-        )
-        if confidence_match:
-            return cls._clamp01(1.0 - float(confidence_match.group(1)))
         return None
 
     @classmethod
-    def _extract_message_adoption_scores(
+    def _extract_alpha_scores(
         cls,
         text: str,
     ) -> Dict[str, float]:
@@ -188,7 +173,7 @@ class MASMethod:
             return {}
 
         parsed: Dict[str, float] = {}
-        for match in re.finditer(r"<message_adoption\b([^>]*)/?>", text, flags=re.IGNORECASE):
+        for match in re.finditer(r"<alpha\b([^>]*)/?>", text, flags=re.IGNORECASE):
             attrs = match.group(1)
             agent_match = re.search(r'\bagent="([^"]+)"', attrs, flags=re.IGNORECASE)
             if not agent_match:
@@ -201,10 +186,10 @@ class MASMethod:
                 parsed[agent_match.group(1).strip()] = score
         return parsed
 
-    def _default_message_adoption_scores(self, incoming_labels: List[str]) -> Dict[str, float]:
+    def _default_alpha_scores(self, incoming_labels: List[str]) -> Dict[str, float]:
         return {label: 1.0 for label in incoming_labels}
 
-    def _self_uncertainty_by_method(
+    def _local_uncertainty_by_method(
         self,
         text: str,
         uq_stats: Dict | None,
@@ -212,24 +197,22 @@ class MASMethod:
         selected = _selected_uq_methods(self.args)
         out: Dict[str, float | None] = {}
         for method in selected:
-            if method == "ASK4CONF":
-                out[method] = self._extract_agent_uncertainty(text)
+            if method == "Verb":
+                out[method] = self._extract_local_uncertainty(text)
             elif method == "MSP":
                 out[method] = None if uq_stats is None else uq_stats.get("msp")
-            elif method == "NLL":
-                out[method] = None if uq_stats is None else uq_stats.get("nll")
         return out
 
-    def _message_adoption(
+    def _alpha(
         self,
         text: str,
         incoming_labels: List[str],
     ) -> Dict[str, float]:
         selected = _selected_uq_methods(self.args)
-        if "ASK4CONF" in selected or "NLL" in selected:
-            return self._extract_message_adoption_scores(text)
+        if "Verb" in selected:
+            return self._extract_alpha_scores(text)
         if any(method in LOGIT_UQ_METHODS for method in selected):
-            return self._default_message_adoption_scores(incoming_labels)
+            return self._default_alpha_scores(incoming_labels)
         return {}
 
     @staticmethod
@@ -243,13 +226,11 @@ class MASMethod:
     def _strip_uncertainty_metadata(text: str) -> str:
         if not text:
             return text
-        out = re.sub(r"<agent_uncertainty\b[^>]*>.*?</agent_uncertainty>", "", text, flags=re.IGNORECASE | re.DOTALL)
-        out = re.sub(r"<agent_uncertainty\b[^>]*/>", "", out, flags=re.IGNORECASE)
-        out = re.sub(r"<message_adoption\b[^>]*/>", "", out, flags=re.IGNORECASE)
-        out = re.sub(r"<agent_confidence\b[^>]*>.*?</agent_confidence>", "", out, flags=re.IGNORECASE | re.DOTALL)
-        out = re.sub(r"<agent_confidence\b[^>]*/>", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"<local_uncertainty\b[^>]*>.*?</local_uncertainty>", "", text, flags=re.IGNORECASE | re.DOTALL)
+        out = re.sub(r"<local_uncertainty\b[^>]*/>", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"<alpha\b[^>]*/>", "", out, flags=re.IGNORECASE)
         out = re.sub(
-            r"(?im)^[ \t>*`-]*(?:agent'?s?\s+uncertainty|self[_\s-]*uncertainty|message\s+adoption)\s*[:=]\s*[^\n\r]*$",
+            r"(?im)^[ \t>*`-]*(?:local[_\s-]*uncertainty|alpha)\s*[:=]\s*[^\n\r]*$",
             "",
             out,
         )
@@ -260,9 +241,6 @@ class MASMethod:
         mode = getattr(self.args, "mas_inter_agent_think", "strip")
         cleaned = text.strip() if mode == "pass" else self._strip_think_blocks(text)
         return self._strip_uncertainty_metadata(cleaned)
-
-    def _nll_target_text(self, *, agent_idx: int, text: str, peer_output: str) -> str:
-        return (text or "").strip()
 
     @staticmethod
     def _extract_answer_only(text: str) -> str:
@@ -283,47 +261,13 @@ class MASMethod:
 
     def _prediction_from_answer_text(self, text: str):
         clean_text = strip_structured_uncertainty_blocks(text or "")
-        if self.task in ["mbppplus", "humanevalplus"]:
+        if self.task == "mbppplus":
             return extract_markdown_python_block(clean_text)
-        if self.task in ["aime2024", "aime2025", "gsm8k"]:
+        if self.task == "gsm8k":
             return normalize_answer(extract_gsm8k_answer(clean_text))
-        if self.task in ["gpqa", "arc_easy", "arc_challenge", "medqa"]:
+        if self.task == "medqa":
             return normalize_answer(extract_mcq_choice(clean_text))
         return normalize_answer(extract_gsm8k_answer(clean_text))
-
-    def _select_divergent_star_answer(self, trace_map: dict[int, dict]) -> tuple[str, object]:
-        leaf_indices = [agent.index for agent in self.agents if not self.graph.outgoing(agent.index)]
-        leaf_answers = []
-        for agent_idx in leaf_indices:
-            trace = trace_map.get(agent_idx)
-            if trace is None:
-                continue
-            answer_text = trace.get("peer_output", "") or self._extract_answer_only(trace.get("output", ""))
-            pred = self._prediction_from_answer_text(answer_text)
-            leaf_answers.append((agent_idx, answer_text, pred))
-
-        if not leaf_answers:
-            fallback_trace = trace_map[max(trace_map)]
-            answer_text = fallback_trace.get("peer_output", "") or self._extract_answer_only(fallback_trace.get("output", ""))
-            return answer_text, self._prediction_from_answer_text(answer_text)
-
-        vote_counts: dict[str, int] = {}
-        chosen_by_key: dict[str, tuple[str, object]] = {}
-        fallback_choice: tuple[str, object] | None = None
-        for _, answer_text, pred in leaf_answers:
-            if fallback_choice is None:
-                fallback_choice = (answer_text, pred)
-            if pred is None:
-                continue
-            vote_key = str(pred)
-            vote_counts[vote_key] = vote_counts.get(vote_key, 0) + 1
-            chosen_by_key.setdefault(vote_key, (answer_text, pred))
-
-        if not vote_counts:
-            return fallback_choice if fallback_choice is not None else ("", None)
-
-        best_vote_key = max(vote_counts.items(), key=lambda item: item[1])[0]
-        return chosen_by_key[best_vote_key]
 
     def _build_skipped_result(
         self,
@@ -435,12 +379,10 @@ class MASMethod:
                             "input_tokens": tokens_batch[pos],
                             "output": "",
                             "peer_output": "",
-                            "nll_target_text": "",
-                            "self_uncertainty": None,
-                            "self_uncertainty_by_method": {method: None for method in selected_methods},
+                            "local_uncertainty": None,
+                            "local_uncertainty_by_method": {method: None for method in selected_methods},
                             "logits_uq_stats": None,
-                            "logits_uq_stats_nll_target": None,
-                            "message_adoption": self._message_adoption("", incoming_labels),
+                            "alpha": self._alpha("", incoming_labels),
                             "skipped": True,
                             "skip_reason": skip_reasons[item_idx],
                         }
@@ -488,11 +430,6 @@ class MASMethod:
                         "text_out": text_out,
                         "generation_detail": generation_detail,
                         "peer_output": peer_output,
-                        "nll_target_text": self._nll_target_text(
-                            agent_idx=agent.index,
-                            text=text_out,
-                            peer_output=peer_output,
-                        ),
                     }
                 )
 
@@ -501,23 +438,12 @@ class MASMethod:
                 item_idx = parsed_output["item_idx"]
                 text_out = parsed_output["text_out"]
                 generation_detail = parsed_output["generation_detail"]
-                nll_target_stat = None
-                if "NLL" in selected_methods:
-                    nll_target_stat = self.model.target_uq_stats_from_generation(
-                        generation_text=text_out,
-                        generated_token_ids=list(generation_detail.get("generated_token_ids") or []),
-                        token_logprobs=list(generation_detail.get("token_logprobs") or []),
-                        target_text=parsed_output["nll_target_text"],
-                        prefer_last=True,
-                    )
-                self_uncertainty_by_method = self._self_uncertainty_by_method(
+                local_uncertainty_by_method = self._local_uncertainty_by_method(
                     text_out,
                     generation_detail.get("uq_stats"),
                 )
-                if "NLL" in selected_methods and nll_target_stat is not None:
-                    self_uncertainty_by_method["NLL"] = nll_target_stat.get("nll")
-                message_adoption = self._message_adoption(text_out, incoming_labels)
-                self_uncertainty = self_uncertainty_by_method.get("ASK4CONF")
+                alpha = self._alpha(text_out, incoming_labels)
+                local_uncertainty = local_uncertainty_by_method.get("Verb")
                 trimmed_ids = kept_input_ids[kept_pos][kept_attention_mask[kept_pos].bool()].to("cpu").tolist()
 
                 trace_maps[item_idx][agent.index] = {
@@ -531,12 +457,10 @@ class MASMethod:
                     "input_tokens": kept_tokens_batch[kept_pos],
                     "output": text_out,
                     "peer_output": parsed_output["peer_output"],
-                    "nll_target_text": parsed_output["nll_target_text"],
-                    "self_uncertainty": self_uncertainty,
-                    "self_uncertainty_by_method": self_uncertainty_by_method,
+                    "local_uncertainty": local_uncertainty,
+                    "local_uncertainty_by_method": local_uncertainty_by_method,
                     "logits_uq_stats": generation_detail.get("uq_stats"),
-                    "logits_uq_stats_nll_target": nll_target_stat,
-                    "message_adoption": message_adoption,
+                    "alpha": alpha,
                 }
 
                 if self.prompt_mode == "legacy_sequential":
@@ -572,14 +496,11 @@ class MASMethod:
                     )
                 )
                 continue
-            if self._is_star_divergent():
-                final_text, pred = self._select_divergent_star_answer(trace_maps[idx])
-            else:
-                final_text = final_texts[idx] or trace_maps[idx][self.graph.node_num - 1]["output"]
-                pred = None
+            final_text = final_texts[idx] or trace_maps[idx][self.graph.node_num - 1]["output"]
+            pred = None
             final_text_for_eval = strip_structured_uncertainty_blocks(final_text)
 
-            if self.task in ["mbppplus", "humanevalplus"]:
+            if self.task == "mbppplus":
                 pred = pred if pred is not None else extract_markdown_python_block(final_text_for_eval)
                 gold = item.get("gold", "")
                 if pred is None:
@@ -590,16 +511,7 @@ class MASMethod:
                 print("=========================================")
                 print(f"Question {idx}")
                 print(f"error_msg: {error_msg}")
-            elif self.task in ["aime2024", "aime2025"]:
-                pred = pred if pred is not None else normalize_answer(extract_gsm8k_answer(final_text_for_eval))
-                gold = str(item.get("gold", "")).strip()
-                try:
-                    ok = int(pred) == int(gold)
-                    error_msg = None
-                except ValueError:
-                    ok = False
-                    error_msg = f"Value error in parsing answer. Pred: {pred}, Gold: {gold}"
-            elif self.task in ["gpqa", "arc_easy", "arc_challenge", "medqa"]:
+            elif self.task == "medqa":
                 pred = pred if pred is not None else normalize_answer(extract_mcq_choice(final_text_for_eval))
                 gold = item.get("gold", "")
                 ok = (pred == gold) if (pred and gold) else False

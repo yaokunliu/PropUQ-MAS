@@ -4,6 +4,9 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
+PRR_MAX_REJECTION_RATE = 0.5
+
+
 def parse_uncertainty_value(value):
     if value is None:
         return None
@@ -20,12 +23,12 @@ def parse_uncertainty_value(value):
     return None
 
 
-def extract_agent_uncertainty(text: str):
+def extract_local_uncertainty(text: str):
     if not text:
         return None
 
     match = re.search(
-        r'<agent_uncertainty\b[^>]*\bscore="([01](?:\.\d+)?|0?\.\d+)"[^>]*/?>',
+        r'<local_uncertainty\b[^>]*\bscore="([01](?:\.\d+)?|0?\.\d+)"[^>]*/?>',
         text,
         flags=re.IGNORECASE,
     )
@@ -33,19 +36,11 @@ def extract_agent_uncertainty(text: str):
         return float(match.group(1))
 
     match = re.search(
-        r"(?im)^\s*(?:agent'?s?\s+uncertainty|self[_\s-]*uncertainty)\s*[:=]\s*([01](?:\.\d+)?|0?\.\d+)\s*$",
+        r"(?im)^\s*local[_\s-]*uncertainty\s*[:=]\s*([01](?:\.\d+)?|0?\.\d+)\s*$",
         text,
     )
     if match:
         return float(match.group(1))
-
-    match = re.search(
-        r'<agent_confidence\s+score="([01](?:\.\d+)?|0?\.\d+)"\s*(?:/>|>)',
-        text,
-        flags=re.IGNORECASE,
-    )
-    if match:
-        return 1.0 - float(match.group(1))
 
     return None
 
@@ -60,88 +55,133 @@ def _normalize_agent_label(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).lower())
 
 
-def _is_divergent_star(pred: Dict) -> bool:
+def extract_alpha_scores(text: str) -> Dict[str, float]:
+    if not text:
+        return {}
+
+    parsed: Dict[str, float] = {}
+    for match in re.finditer(r"<alpha\b([^>]*)/?>", text, flags=re.IGNORECASE):
+        attrs = match.group(1)
+        agent_match = re.search(r'\bagent="([^"]+)"', attrs, flags=re.IGNORECASE)
+        if not agent_match:
+            continue
+        score_match = re.search(
+            r'\bscore="([01](?:\.\d+)?|0?\.\d+)"',
+            attrs,
+            flags=re.IGNORECASE,
+        )
+        if not score_match:
+            continue
+        parsed[agent_match.group(1).strip()] = _clamp01(float(score_match.group(1)))
+    return {
+        agent_name: score
+        for agent_name, score in parsed.items()
+        if score is not None
+    }
+
+
+def _legacy_prompt_label_aliases(name: str, role: str, pred: Dict) -> List[str]:
     graph = pred.get("mas_graph") or {}
-    return graph.get("topology") == "star_divergent"
+    topology = str(graph.get("topology", "") or "").strip().lower()
+    role_name = str(role or "").strip().lower()
+    canonical_name = str(name or "").strip()
+
+    if topology == "sequential":
+        label_map = {
+            "planner": "Planner Agent",
+            "critic": "Critic Agent",
+            "refiner": "Refiner Agent",
+            "judger": "Judger Agent",
+        }
+        mapped = label_map.get(role_name)
+        return [mapped] if mapped else []
+
+    if topology == "hierarchical":
+        label_map = {
+            "planner": "Math Agent",
+            "critic": "Science Agent",
+            "refiner": "Code Agent",
+            "judger": "Task Summarizer",
+        }
+        mapped = label_map.get(role_name)
+        return [mapped] if mapped else []
+
+    if canonical_name.endswith("Agent"):
+        return [canonical_name]
+    return []
 
 
-_LEGACY_ROLE_LABEL_ALIASES = {
-    "planner": ("Planner Agent", "Math Agent"),
-    "critic": ("Critic Agent", "Science Agent"),
-    "refiner": ("Refiner Agent", "Code Agent"),
-    "judger": ("Judger Agent", "Task Summarizer"),
-}
-
-
-def _agent_aliases(name: str, role: str, fallback_idx: Optional[int] = None) -> List[str]:
+def _agent_aliases(name: str, role: str, pred: Dict) -> List[str]:
     aliases = {name, role}
     agent_num_match = re.search(r"(\d+)", str(name))
     if agent_num_match:
         aliases.add(f"Agent {agent_num_match.group(1)}")
-    if fallback_idx is not None:
-        aliases.add(f"Agent {fallback_idx + 1}")
-    for label in _LEGACY_ROLE_LABEL_ALIASES.get(str(role).lower(), ()):
-        aliases.add(label)
+    aliases.update(_legacy_prompt_label_aliases(name, role, pred))
     return [alias for alias in aliases if alias]
 
 
-def _graph_incoming_agent_names(agent: Dict, pred: Dict, fallback_idx: Optional[int] = None) -> List[str] | None:
+def _graph_incoming_agent_names(agent: Dict, pred: Dict) -> List[str] | None:
     if isinstance(agent.get("incoming_agents"), list):
         return [str(name) for name in agent.get("incoming_agents", []) if str(name).strip()]
     graph = pred.get("mas_graph") or {}
     incoming = graph.get("incoming", {})
+    name = str(agent.get("name", ""))
     if isinstance(incoming, dict):
-        for alias in _agent_aliases(str(agent.get("name", "")), str(agent.get("role", "")), fallback_idx):
-            if alias in incoming:
-                return [str(label) for label in incoming.get(alias, []) if str(label).strip()]
+        return [str(label) for label in incoming.get(name, []) if str(label).strip()]
     return None
 
 
-def _graph_hazard_time_step_index(agent: Dict, pred: Dict, fallback_idx: int) -> int:
-    if isinstance(pred.get("mas_graph"), dict):
-        graph = pred["mas_graph"]
-        levels = graph.get("levels", {})
-        if isinstance(levels, dict):
-            for alias in _agent_aliases(str(agent.get("name", "")), str(agent.get("role", "")), fallback_idx):
-                level = levels.get(alias)
-                if isinstance(level, int):
-                    return level
-    return fallback_idx
-
-
-def _graph_hazard_num_time_steps(pred: Dict, agents: List[Dict]) -> int:
-    graph = pred.get("mas_graph") or {}
-    levels = graph.get("levels", {})
-    if isinstance(levels, dict) and levels:
-        max_level = max(int(level) for level in levels.values())
-        return max_level + 1
-    return len(agents)
-
-
-def _compute_formula_uncertainty(
-    *,
-    self_uncertainty: Optional[float],
-    message_adoption: Dict[str, float],
-    previous_formula_uncertainties: Dict[str, float],
-    incoming_agent_names: List[str],
-) -> Optional[float]:
-    base_uncertainty = _clamp01(self_uncertainty)
-    factors = [1.0 - base_uncertainty] if base_uncertainty is not None else []
-    has_signal = base_uncertainty is not None
-
-    normalized_adoption = {
+def _jsonl_alpha_lookup(alpha: Dict[str, float]) -> Dict[str, float]:
+    return {
         _normalize_agent_label(agent_name): _clamp01(parse_uncertainty_value(score))
-        for agent_name, score in message_adoption.items()
+        for agent_name, score in alpha.items()
         if _clamp01(parse_uncertainty_value(score)) is not None
     }
 
+
+def _alpha_lookup(
+    alpha: Dict[str, float],
+    incoming_agent_names: List[str],
+) -> Dict[str, float]:
+    raw_lookup = _jsonl_alpha_lookup(alpha)
+    incoming_alpha: Dict[str, float] = {}
+    total_alpha = 0.0
     for incoming_name in incoming_agent_names:
-        alpha = normalized_adoption.get(_normalize_agent_label(incoming_name))
-        source_pi = previous_formula_uncertainties.get(_normalize_agent_label(incoming_name))
-        if alpha is None or source_pi is None:
+        normalized_name = _normalize_agent_label(incoming_name)
+        alpha_value = raw_lookup.get(normalized_name)
+        if alpha_value is None or alpha_value <= 0.0:
+            continue
+        incoming_alpha[normalized_name] = alpha_value
+        total_alpha += alpha_value
+
+    if total_alpha <= 0.0:
+        return {}
+
+    return {
+        normalized_name: alpha_value / total_alpha
+        for normalized_name, alpha_value in incoming_alpha.items()
+    }
+
+
+def _compute_prop_uncertainty(
+    *,
+    local_uncertainty: Optional[float],
+    alpha: Dict[str, float],
+    previous_prop_uncertainties: Dict[str, float],
+    incoming_agent_names: List[str],
+) -> Optional[float]:
+    base_uncertainty = _clamp01(local_uncertainty)
+    factors = [1.0 - base_uncertainty] if base_uncertainty is not None else []
+    has_signal = base_uncertainty is not None
+    alpha_lookup = _alpha_lookup(alpha, incoming_agent_names)
+
+    for incoming_name in incoming_agent_names:
+        alpha_value = alpha_lookup.get(_normalize_agent_label(incoming_name))
+        source_pi = previous_prop_uncertainties.get(_normalize_agent_label(incoming_name))
+        if alpha_value is None or source_pi is None:
             continue
         has_signal = True
-        factors.append(1.0 - alpha * source_pi)
+        factors.append(1.0 - alpha_value * source_pi)
 
     if not has_signal:
         return None
@@ -152,98 +192,62 @@ def _compute_formula_uncertainty(
     return _clamp01(1.0 - prod)
 
 
-def _compute_hazard_ht(step_formula_uncertainties: List[Optional[float]]) -> Optional[float]:
-    pi_vals = [
-        _clamp01(value)
-        for value in step_formula_uncertainties
-        if _clamp01(value) is not None
-    ]
-    if not pi_vals:
-        return None
-    mean_pi = sum(pi_vals) / len(pi_vals)
-    max_pi = max(pi_vals)
-    return _clamp01((mean_pi + max_pi) / 2.0)
-
-
-def _aggregate_temporal_uncertainty(step_scores: List[Optional[float]]) -> Optional[float]:
-    valid_scores = [
-        _clamp01(score)
-        for score in step_scores
-        if _clamp01(score) is not None
-    ]
-    if not valid_scores:
-        return None
-
-    prod = 1.0
-    for score in valid_scores:
-        prod *= (1.0 - score)
-    return _clamp01(1.0 - (prod ** (1.0 / len(valid_scores))))
-
-
 def _normalized_structural_uncertainty(value: Optional[float], uq_method: str) -> Optional[float]:
     parsed = parse_uncertainty_value(value)
     if parsed is None:
         return None
-    if uq_method in {"ASK4CONF", "MSP"}:
+    if uq_method in {"Verb", "MSP"}:
         return _clamp01(parsed)
-    if uq_method == "NLL":
-        return _clamp01(1.0 - math.exp(-parsed))
     return _clamp01(parsed)
 
 
 def _pred_available_uq_methods(pred: Dict) -> List[str]:
     methods: List[str] = []
     for agent in pred.get("agents", []):
-        by_method = agent.get("self_uncertainty_by_method")
+        by_method = agent.get("local_uncertainty_by_method")
         if isinstance(by_method, dict):
             for method_name in by_method:
                 if method_name not in methods:
                     methods.append(method_name)
     if not methods:
-        methods.append("ASK4CONF")
+        methods.append("Verb")
     return methods
 
 
-def _agent_self_uncertainty_for_method(agent: Dict, uq_method: str) -> Optional[float]:
-    by_method = agent.get("self_uncertainty_by_method")
+def _agent_local_uncertainty_for_method(agent: Dict, uq_method: str) -> Optional[float]:
+    by_method = agent.get("local_uncertainty_by_method")
     if isinstance(by_method, dict) and uq_method in by_method:
         return parse_uncertainty_value(by_method.get(uq_method))
-    if uq_method == "ASK4CONF":
-        value = parse_uncertainty_value(agent.get("self_uncertainty"))
+    if uq_method == "Verb":
+        value = parse_uncertainty_value(agent.get("local_uncertainty"))
         if value is not None:
             return value
-        return extract_agent_uncertainty(agent.get("output", ""))
+        return extract_local_uncertainty(agent.get("output", ""))
     return None
 
 
-def _agent_message_adoption_for_method(agent: Dict, uq_method: str) -> Dict[str, float]:
-    value = agent.get("message_adoption", {})
-    if isinstance(value, dict):
-        return value
-    by_method = agent.get("message_adoption_by_method")
+def _agent_alpha_for_method(agent: Dict, uq_method: str) -> Dict[str, float]:
+    by_method = agent.get("alpha_by_method")
     if isinstance(by_method, dict):
         method_value = by_method.get(uq_method)
         if isinstance(method_value, dict):
             return method_value
+    value = agent.get("alpha", {})
+    if isinstance(value, dict) and value:
+        return value
+    parsed_from_output = extract_alpha_scores(str(agent.get("output", "")))
+    if parsed_from_output:
+        return parsed_from_output
+    if isinstance(value, dict):
+        return value
     return {}
-
-
-def _resolved_message_adoption_for_method(
-    agent: Dict,
-    uq_method: str,
-    incoming_agent_names: List[str],
-    adoption_mode: str,
-) -> Dict[str, float]:
-    if adoption_mode == "all_one":
-        return {str(name): 1.0 for name in incoming_agent_names if str(name).strip()}
-    return _agent_message_adoption_for_method(agent, uq_method)
 
 
 def _agent_method_field(agent: Dict, field_name: str, uq_method: str):
     by_method = agent.get(f"{field_name}_by_method")
     if isinstance(by_method, dict) and uq_method in by_method:
         return by_method.get(uq_method)
-    if uq_method == "ASK4CONF":
+    if uq_method == "Verb":
         return agent.get(field_name)
     return None
 
@@ -252,157 +256,103 @@ def _pred_method_field(pred: Dict, field_name: str, uq_method: str):
     by_method = pred.get(f"{field_name}_by_method")
     if isinstance(by_method, dict) and uq_method in by_method:
         return by_method.get(uq_method)
-    if uq_method == "ASK4CONF":
+    if uq_method == "Verb":
         return pred.get(field_name)
     return None
 
 
-def enrich_mas_pred_with_posthoc_uncertainty(pred: Dict, adoption_mode: str = "original") -> Dict:
+def enrich_mas_pred_with_posthoc_uncertainty(pred: Dict) -> Dict:
     agents = pred.get("agents", [])
     if not agents:
         return pred
 
     uq_methods = _pred_available_uq_methods(pred)
-    pred["uncertainty_agent_list_by_method"] = {}
-    pred["uncertainty_final_by_method"] = {}
-    pred["formula_uncertainty_agent_list_by_method"] = {}
-    pred["formula_uncertainty_final_by_method"] = {}
-    pred["hazard_ht_list_by_method"] = {}
-    pred["hazard_ht_final_by_method"] = {}
-    pred["system_step_uncertainty_list_by_method"] = {}
-    pred["system_uncertainty_final_by_method"] = {}
+    pred["local_uncertainty_agent_list_by_method"] = {}
+    pred["local_uncertainty_final_by_method"] = {}
+    pred["prop_uncertainty_agent_list_by_method"] = {}
+    pred["prop_uncertainty_final_by_method"] = {}
 
     for uq_method in uq_methods:
-        formula_uncertainty_states: Dict[str, float] = {}
-        formula_values: List[Optional[float]] = []
-        hazard_num_steps = _graph_hazard_num_time_steps(pred, agents)
-        hazard_step_formula_uncertainties: List[List[Optional[float]]] = [[] for _ in range(hazard_num_steps)]
-        agent_hazard_step_indices: List[int] = []
-        self_values: List[float] = []
+        prop_uncertainty_states: Dict[str, float] = {}
+        prop_values: List[Optional[float]] = []
+        local_values: List[float] = []
 
-        for fallback_idx, agent in enumerate(agents):
+        for agent in agents:
             role = str(agent.get("role", "")).lower()
             name = agent.get("name", "Agent")
-            self_uncertainty = _agent_self_uncertainty_for_method(agent, uq_method)
-            structural_self_uncertainty = _normalized_structural_uncertainty(self_uncertainty, uq_method)
-            hazard_step_idx = _graph_hazard_time_step_index(agent, pred, fallback_idx)
-            incoming_agent_names = _graph_incoming_agent_names(agent, pred, fallback_idx) or []
-            message_adoption = _resolved_message_adoption_for_method(
-                agent,
-                uq_method,
-                incoming_agent_names,
-                adoption_mode,
-            )
-            formula_uncertainty = _compute_formula_uncertainty(
-                self_uncertainty=structural_self_uncertainty,
-                message_adoption=message_adoption,
-                previous_formula_uncertainties=formula_uncertainty_states,
+            local_uncertainty = _agent_local_uncertainty_for_method(agent, uq_method)
+            structural_local_uncertainty = _normalized_structural_uncertainty(local_uncertainty, uq_method)
+            incoming_agent_names = _graph_incoming_agent_names(agent, pred) or []
+            alpha = _agent_alpha_for_method(agent, uq_method)
+            prop_uncertainty = _compute_prop_uncertainty(
+                local_uncertainty=structural_local_uncertainty,
+                alpha=alpha,
+                previous_prop_uncertainties=prop_uncertainty_states,
                 incoming_agent_names=incoming_agent_names,
             )
 
-            agent.setdefault("self_uncertainty_num_by_method", {})[uq_method] = parse_uncertainty_value(self_uncertainty)
-            agent.setdefault("formula_uncertainty_by_method", {})[uq_method] = formula_uncertainty
-            formula_values.append(formula_uncertainty)
-            if hazard_step_idx >= len(hazard_step_formula_uncertainties):
-                hazard_step_formula_uncertainties.extend(
-                    [] for _ in range(hazard_step_idx + 1 - len(hazard_step_formula_uncertainties))
-                )
-            hazard_step_formula_uncertainties[hazard_step_idx].append(formula_uncertainty)
-            agent_hazard_step_indices.append(hazard_step_idx)
-            parsed_self = parse_uncertainty_value(self_uncertainty)
-            if parsed_self is not None:
-                self_values.append(parsed_self)
-            for alias in _agent_aliases(name, role, fallback_idx):
-                if formula_uncertainty is not None:
-                    formula_uncertainty_states[_normalize_agent_label(alias)] = formula_uncertainty
+            agent.setdefault("local_uncertainty_num_by_method", {})[uq_method] = parse_uncertainty_value(local_uncertainty)
+            agent.setdefault("prop_uncertainty_by_method", {})[uq_method] = prop_uncertainty
+            prop_values.append(prop_uncertainty)
+            parsed_local = parse_uncertainty_value(local_uncertainty)
+            if parsed_local is not None:
+                local_values.append(parsed_local)
+            for alias in _agent_aliases(name, role, pred):
+                if prop_uncertainty is not None:
+                    prop_uncertainty_states[_normalize_agent_label(alias)] = prop_uncertainty
 
-        hazard_values = [
-            _compute_hazard_ht(step_formula_uncertainties)
-            for step_formula_uncertainties in hazard_step_formula_uncertainties
-        ]
-        for agent, step_idx in zip(agents, agent_hazard_step_indices):
-            agent.setdefault("hazard_ht_by_method", {})[uq_method] = hazard_values[step_idx]
-
-        pred["uncertainty_agent_list_by_method"][uq_method] = self_values
-        pred["uncertainty_final_by_method"][uq_method] = self_values[-1] if self_values else None
-        pred["formula_uncertainty_agent_list_by_method"][uq_method] = [v for v in formula_values if v is not None]
-        pred["formula_uncertainty_final_by_method"][uq_method] = (
-            pred["formula_uncertainty_agent_list_by_method"][uq_method][-1]
-            if pred["formula_uncertainty_agent_list_by_method"][uq_method]
+        pred["local_uncertainty_agent_list_by_method"][uq_method] = local_values
+        pred["local_uncertainty_final_by_method"][uq_method] = local_values[-1] if local_values else None
+        pred["prop_uncertainty_agent_list_by_method"][uq_method] = [v for v in prop_values if v is not None]
+        pred["prop_uncertainty_final_by_method"][uq_method] = (
+            pred["prop_uncertainty_agent_list_by_method"][uq_method][-1]
+            if pred["prop_uncertainty_agent_list_by_method"][uq_method]
             else None
         )
-        pred["hazard_ht_list_by_method"][uq_method] = hazard_values
-        pred["hazard_ht_final_by_method"][uq_method] = hazard_values[-1] if hazard_values else None
-        pred["system_step_uncertainty_list_by_method"][uq_method] = hazard_values
-        pred["system_uncertainty_final_by_method"][uq_method] = _aggregate_temporal_uncertainty(hazard_values)
-        if _is_divergent_star(pred):
-            pred["uncertainty_final_by_method"][uq_method] = None
-            pred["formula_uncertainty_final_by_method"][uq_method] = None
-
-    if "ASK4CONF" in uq_methods:
-        pred["uncertainty_agent_list"] = pred["uncertainty_agent_list_by_method"].get("ASK4CONF", [])
-        pred["uncertainty_final"] = pred["uncertainty_final_by_method"].get("ASK4CONF")
-        pred["formula_uncertainty_agent_list"] = pred["formula_uncertainty_agent_list_by_method"].get("ASK4CONF", [])
-        pred["formula_uncertainty_final"] = pred["formula_uncertainty_final_by_method"].get("ASK4CONF")
-        pred["hazard_ht_list"] = pred["hazard_ht_list_by_method"].get("ASK4CONF", [])
-        pred["hazard_ht_final"] = pred["hazard_ht_final_by_method"].get("ASK4CONF")
-        pred["system_step_uncertainty_list"] = pred["system_step_uncertainty_list_by_method"].get("ASK4CONF", [])
-        pred["system_uncertainty_final"] = pred["system_uncertainty_final_by_method"].get("ASK4CONF")
+    if "Verb" in uq_methods:
+        pred["local_uncertainty_agent_list"] = pred["local_uncertainty_agent_list_by_method"].get("Verb", [])
+        pred["local_uncertainty_final"] = pred["local_uncertainty_final_by_method"].get("Verb")
+        pred["prop_uncertainty_agent_list"] = pred["prop_uncertainty_agent_list_by_method"].get("Verb", [])
+        pred["prop_uncertainty_final"] = pred["prop_uncertainty_final_by_method"].get("Verb")
         for agent in agents:
-            if isinstance(agent.get("self_uncertainty_num_by_method"), dict):
-                agent["self_uncertainty_num"] = agent["self_uncertainty_num_by_method"].get("ASK4CONF")
-            if isinstance(agent.get("formula_uncertainty_by_method"), dict):
-                agent["formula_uncertainty"] = agent["formula_uncertainty_by_method"].get("ASK4CONF")
-            if isinstance(agent.get("hazard_ht_by_method"), dict):
-                agent["hazard_ht"] = agent["hazard_ht_by_method"].get("ASK4CONF")
+            if isinstance(agent.get("local_uncertainty_num_by_method"), dict):
+                agent["local_uncertainty_num"] = agent["local_uncertainty_num_by_method"].get("Verb")
+            if isinstance(agent.get("prop_uncertainty_by_method"), dict):
+                agent["prop_uncertainty"] = agent["prop_uncertainty_by_method"].get("Verb")
     return pred
 
 
-def apply_posthoc_uncertainty(preds: List[Dict], method: str, adoption_mode: str = "original"):
+def apply_posthoc_uncertainty(preds: List[Dict], method: str):
     if method != "mas":
         return preds
     for pred in preds:
-        enrich_mas_pred_with_posthoc_uncertainty(pred, adoption_mode=adoption_mode)
+        enrich_mas_pred_with_posthoc_uncertainty(pred)
     return preds
 
 
-def _final_uncertainty_from_pred(pred: Dict, uq_method: str = "ASK4CONF", source: str = "self"):
-    if _is_divergent_star(pred) and source not in {"hazard", "system"}:
-        return None
-    if source == "formula":
-        value = _pred_method_field(pred, "formula_uncertainty_final", uq_method)
-        return parse_uncertainty_value(value)
-    if source == "hazard":
-        value = _pred_method_field(pred, "hazard_ht_final", uq_method)
-        return parse_uncertainty_value(value)
-    if source == "system":
-        value = _pred_method_field(pred, "system_uncertainty_final", uq_method)
+def _final_uncertainty_from_pred(pred: Dict, uq_method: str = "Verb", source: str = "local"):
+    if source == "prop":
+        value = _pred_method_field(pred, "prop_uncertainty_final", uq_method)
         return parse_uncertainty_value(value)
 
-    value = _pred_method_field(pred, "uncertainty_final", uq_method)
+    value = _pred_method_field(pred, "local_uncertainty_final", uq_method)
     if value is not None:
         return parse_uncertainty_value(value)
-    if uq_method == "ASK4CONF" and pred.get("uncertainty") is not None:
-        return parse_uncertainty_value(pred["uncertainty"])
     agents = pred.get("agents", [])
     if agents:
-        value = _agent_self_uncertainty_for_method(agents[-1], uq_method)
+        value = _agent_local_uncertainty_for_method(agents[-1], uq_method)
         if value is not None:
             return value
-    if uq_method == "ASK4CONF":
-        return extract_agent_uncertainty(pred.get("raw_prediction", ""))
+    if uq_method == "Verb":
+        return extract_local_uncertainty(pred.get("raw_prediction", ""))
     return None
 
 
-def _all_agent_uncertainties_from_pred(pred: Dict, uq_method: str = "ASK4CONF", source: str = "self"):
-    if source == "formula":
-        value = _pred_method_field(pred, "formula_uncertainty_agent_list", uq_method)
-    elif source == "hazard":
-        value = _pred_method_field(pred, "hazard_ht_list", uq_method)
-    elif source == "system":
-        value = _pred_method_field(pred, "system_step_uncertainty_list", uq_method)
+def _all_agent_uncertainties_from_pred(pred: Dict, uq_method: str = "Verb", source: str = "local"):
+    if source == "prop":
+        value = _pred_method_field(pred, "prop_uncertainty_agent_list", uq_method)
     else:
-        value = _pred_method_field(pred, "uncertainty_agent_list", uq_method)
+        value = _pred_method_field(pred, "local_uncertainty_agent_list", uq_method)
     if isinstance(value, list):
         vals = []
         for item in value:
@@ -412,15 +362,10 @@ def _all_agent_uncertainties_from_pred(pred: Dict, uq_method: str = "ASK4CONF", 
         return vals
 
     vals = []
-    if source == "self" and uq_method == "ASK4CONF" and pred.get("uncertainty") is not None:
-        parsed = parse_uncertainty_value(pred["uncertainty"])
-        return [parsed] if parsed is not None else []
-    if source == "system":
-        return vals
-    agent_field = "formula_uncertainty" if source == "formula" else "hazard_ht" if source == "hazard" else "self_uncertainty"
+    agent_field = "prop_uncertainty" if source == "prop" else "local_uncertainty"
     for agent in pred.get("agents", []):
-        if source == "self":
-            parsed = _agent_self_uncertainty_for_method(agent, uq_method)
+        if source == "local":
+            parsed = _agent_local_uncertainty_for_method(agent, uq_method)
         else:
             parsed = parse_uncertainty_value(_agent_method_field(agent, agent_field, uq_method))
         if parsed is not None:
@@ -466,58 +411,89 @@ def _auroc(labels: List[int], scores: List[float]):
     return u_stat / (n_pos * n_neg)
 
 
-def _ece(labels: List[int], probs: List[float], n_bins: int = 10):
+def _rejection_curve_auc_for_order(
+    labels: List[int],
+    rejection_order: List[int],
+    max_rejections: int,
+) -> float | None:
     n = len(labels)
-    if n == 0 or n != len(probs):
+    if n == 0 or max_rejections <= 0:
         return None
-    total = float(n)
-    ece = 0.0
-    for b in range(n_bins):
-        lo = b / n_bins
-        hi = (b + 1) / n_bins
-        idxs = []
-        for i, p in enumerate(probs):
-            if b < n_bins - 1:
-                if lo <= p < hi:
-                    idxs.append(i)
-            else:
-                if lo <= p <= hi:
-                    idxs.append(i)
-        if not idxs:
-            continue
-        acc = sum(labels[i] for i in idxs) / len(idxs)
-        conf = sum(probs[i] for i in idxs) / len(idxs)
-        ece += (len(idxs) / total) * abs(acc - conf)
-    return ece
+
+    kept = n
+    kept_correct = sum(labels)
+    rejection_rates = [0.0]
+    retained_accuracies = [kept_correct / kept]
+
+    for rejected_so_far, idx in enumerate(rejection_order[:max_rejections], start=1):
+        kept -= 1
+        kept_correct -= labels[idx]
+        if kept <= 0:
+            break
+        rejection_rates.append(rejected_so_far / n)
+        retained_accuracies.append(kept_correct / kept)
+
+    if len(rejection_rates) < 2:
+        return None
+
+    auc = 0.0
+    for idx in range(1, len(rejection_rates)):
+        width = rejection_rates[idx] - rejection_rates[idx - 1]
+        auc += width * (retained_accuracies[idx] + retained_accuracies[idx - 1]) / 2.0
+    return auc
 
 
-def _brier(labels: List[int], probs: List[float]):
+def _prr(
+    labels: List[int],
+    confidences: List[float],
+    *,
+    max_rejection_rate: float = PRR_MAX_REJECTION_RATE,
+):
     n = len(labels)
-    if n == 0 or n != len(probs):
+    if n == 0 or n != len(confidences):
         return None
-    return sum((probs[i] - labels[i]) ** 2 for i in range(n)) / n
+
+    max_rejections = min(n - 1, int(math.floor(max_rejection_rate * n)))
+    if max_rejections <= 0:
+        return None
+
+    uncertainty_order = sorted(
+        range(n),
+        key=lambda idx: (confidences[idx], idx),
+    )
+    oracle_order = sorted(
+        range(n),
+        key=lambda idx: (labels[idx], confidences[idx], idx),
+    )
+
+    uncertainty_auc = _rejection_curve_auc_for_order(labels, uncertainty_order, max_rejections)
+    oracle_auc = _rejection_curve_auc_for_order(labels, oracle_order, max_rejections)
+    if uncertainty_auc is None or oracle_auc is None:
+        return None
+
+    random_auc = (sum(labels) / n) * (max_rejections / n)
+    denom = oracle_auc - random_auc
+    if abs(denom) <= 1e-12:
+        return None
+    return (uncertainty_auc - random_auc) / denom
 
 
 def _uncertainty_to_confidence(
     u: Optional[float],
     uq_method: str,
-    source: str = "self",
+    source: str = "local",
 ) -> Optional[float]:
     value = parse_uncertainty_value(u)
     if value is None:
         return None
-    if uq_method == "ASK4CONF":
+    if uq_method == "Verb":
         return _clamp01(1.0 - value)
     if uq_method == "MSP":
-        return _clamp01(1.0 - value)
-    if uq_method == "NLL":
-        if source == "self":
-            return _clamp01(math.exp(-value))
         return _clamp01(1.0 - value)
     return None
 
 
-def evaluate_uncertainty_metrics(preds: List[Dict], mode: str = "final", source: str = "self", uq_method: str = "ASK4CONF"):
+def evaluate_uncertainty_metrics(preds: List[Dict], mode: str = "final", source: str = "local", uq_method: str = "Verb"):
     labels: List[int] = []
     probs_correct: List[float] = []
     ranking_scores: List[float] = []
@@ -546,8 +522,7 @@ def evaluate_uncertainty_metrics(preds: List[Dict], mode: str = "final", source:
     return {
         "n_with_uncertainty": len(labels),
         "auroc": _auroc(labels, ranking_scores),
-        "ece": _ece(labels, probs_correct),
-        "brier": _brier(labels, probs_correct),
+        "prr": _prr(labels, probs_correct),
     }
 
 
@@ -560,28 +535,13 @@ def _pred_has_metric_uncertainty(pred: Dict, mode: str, source: str, uq_method: 
 
 
 def _required_specs_for_complete_case(pred: Dict) -> List[tuple[str, str]]:
-    if _is_divergent_star(pred):
-        return [
-            ("mean", "self"),
-            ("max", "self"),
-            ("mean", "formula"),
-            ("max", "formula"),
-            ("final", "hazard"),
-            ("mean", "hazard"),
-            ("max", "hazard"),
-        ]
-
     return [
-        ("final", "self"),
-        ("mean", "self"),
-        ("max", "self"),
-        ("final", "formula"),
-        ("mean", "formula"),
-        ("max", "formula"),
-        ("final", "hazard"),
-        ("mean", "hazard"),
-        ("max", "hazard"),
-        ("final", "system"),
+        ("final", "local"),
+        ("mean", "local"),
+        ("max", "local"),
+        ("final", "prop"),
+        ("mean", "prop"),
+        ("max", "prop"),
     ]
 
 
@@ -609,14 +569,10 @@ def print_posthoc_sample_reports(preds: List[Dict], args):
         agents = pred.get("agents", [])
         print(f"Problem #{idx} Posthoc:")
         for uq_method in _pred_available_uq_methods(pred):
-            self_values = _all_agent_uncertainties_from_pred(pred, uq_method=uq_method, source="self")
-            formula_values = _all_agent_uncertainties_from_pred(pred, uq_method=uq_method, source="formula")
-            hazard_values = _all_agent_uncertainties_from_pred(pred, uq_method=uq_method, source="hazard")
-            system_step_values = _all_agent_uncertainties_from_pred(pred, uq_method=uq_method, source="system")
-            self_summary = _summarize_uncertainties(self_values)
-            formula_summary = _summarize_uncertainties(formula_values)
-            hazard_summary = _summarize_uncertainties(hazard_values)
-            system_final = _final_uncertainty_from_pred(pred, uq_method=uq_method, source="system")
+            local_values = _all_agent_uncertainties_from_pred(pred, uq_method=uq_method, source="local")
+            prop_values = _all_agent_uncertainties_from_pred(pred, uq_method=uq_method, source="prop")
+            local_summary = _summarize_uncertainties(local_values)
+            prop_summary = _summarize_uncertainties(prop_values)
 
             print(f"  UQ Method: {uq_method}")
             if agents:
@@ -624,37 +580,19 @@ def print_posthoc_sample_reports(preds: List[Dict], args):
                 for agent in agents:
                     print(
                         f"    {agent.get('name', 'Agent')}: "
-                        f"Self={_fmt_unc(_agent_self_uncertainty_for_method(agent, uq_method))} | "
-                        f"Formula={_fmt_unc(_agent_method_field(agent, 'formula_uncertainty', uq_method))} | "
-                        f"h_t={_fmt_unc(_agent_method_field(agent, 'hazard_ht', uq_method))}"
+                        f"Local={_fmt_unc(_agent_local_uncertainty_for_method(agent, uq_method))} | "
+                        f"Prop={_fmt_unc(_agent_method_field(agent, 'prop_uncertainty', uq_method))}"
                     )
-            if hazard_values:
-                print(
-                    "  Hazard-h Steps: "
-                    + " | ".join(f"t{i + 1}={_fmt_unc(v)}" for i, v in enumerate(hazard_values))
-                )
-            if system_step_values:
-                print(
-                    "  System-Step-Uncertainty: "
-                    + " | ".join(f"t{i + 1}={_fmt_unc(v)}" for i, v in enumerate(system_step_values))
-                )
             print(
-                f"  Uncertainty: Final={_fmt_unc(self_summary['final'])} | "
-                f"Mean={_fmt_unc(self_summary['mean'])} | Max={_fmt_unc(self_summary['max'])}"
+                f"  Local-Uncertainty: Final={_fmt_unc(local_summary['final'])} | "
+                f"Mean={_fmt_unc(local_summary['mean'])} | Max={_fmt_unc(local_summary['max'])}"
             )
             print(
-                "  Formula-Uncertainty: "
-                f"Final={_fmt_unc(formula_summary['final'])} | "
-                f"Mean={_fmt_unc(formula_summary['mean'])} | "
-                f"Max={_fmt_unc(formula_summary['max'])}"
+                "  Prop-Uncertainty: "
+                f"Final={_fmt_unc(prop_summary['final'])} | "
+                f"Mean={_fmt_unc(prop_summary['mean'])} | "
+                f"Max={_fmt_unc(prop_summary['max'])}"
             )
-            print(
-                "  Hazard-h: "
-                f"Final={_fmt_unc(hazard_summary['final'])} | "
-                f"Mean={_fmt_unc(hazard_summary['mean'])} | "
-                f"Max={_fmt_unc(hazard_summary['max'])}"
-            )
-            print(f"  System-Uncertainty-Final: {_fmt_unc(system_final)}")
 
 
 def export_preds_jsonl(preds: List[Dict], output_path: Path):
@@ -686,27 +624,19 @@ def load_preds_jsonl(input_path: Path) -> List[Dict]:
 
 def _build_metrics_summary_for_method(preds: List[Dict], uq_method: str) -> Dict:
     complete_case_preds = _filter_complete_case_preds(preds, uq_method)
-    unc_final = evaluate_uncertainty_metrics(complete_case_preds, mode="final", source="self", uq_method=uq_method)
-    unc_mean = evaluate_uncertainty_metrics(complete_case_preds, mode="mean", source="self", uq_method=uq_method)
-    unc_max = evaluate_uncertainty_metrics(complete_case_preds, mode="max", source="self", uq_method=uq_method)
-    formula_unc_final = evaluate_uncertainty_metrics(complete_case_preds, mode="final", source="formula", uq_method=uq_method)
-    formula_unc_mean = evaluate_uncertainty_metrics(complete_case_preds, mode="mean", source="formula", uq_method=uq_method)
-    formula_unc_max = evaluate_uncertainty_metrics(complete_case_preds, mode="max", source="formula", uq_method=uq_method)
-    hazard_ht_final = evaluate_uncertainty_metrics(complete_case_preds, mode="final", source="hazard", uq_method=uq_method)
-    hazard_ht_mean = evaluate_uncertainty_metrics(complete_case_preds, mode="mean", source="hazard", uq_method=uq_method)
-    hazard_ht_max = evaluate_uncertainty_metrics(complete_case_preds, mode="max", source="hazard", uq_method=uq_method)
-    system_unc_final = evaluate_uncertainty_metrics(complete_case_preds, mode="final", source="system", uq_method=uq_method)
+    unc_final = evaluate_uncertainty_metrics(complete_case_preds, mode="final", source="local", uq_method=uq_method)
+    unc_mean = evaluate_uncertainty_metrics(complete_case_preds, mode="mean", source="local", uq_method=uq_method)
+    unc_max = evaluate_uncertainty_metrics(complete_case_preds, mode="max", source="local", uq_method=uq_method)
+    prop_unc_final = evaluate_uncertainty_metrics(complete_case_preds, mode="final", source="prop", uq_method=uq_method)
+    prop_unc_mean = evaluate_uncertainty_metrics(complete_case_preds, mode="mean", source="prop", uq_method=uq_method)
+    prop_unc_max = evaluate_uncertainty_metrics(complete_case_preds, mode="max", source="prop", uq_method=uq_method)
     return {
-        "Uncertainty-Final": unc_final,
-        "Uncertainty-Mean": unc_mean,
-        "Uncertainty-Max": unc_max,
-        "Formula-Uncertainty-Final": formula_unc_final,
-        "Formula-Uncertainty-Mean": formula_unc_mean,
-        "Formula-Uncertainty-Max": formula_unc_max,
-        "Hazard-h-Final": hazard_ht_final,
-        "Hazard-h-Mean": hazard_ht_mean,
-        "Hazard-h-Max": hazard_ht_max,
-        "System-Uncertainty-Final": system_unc_final,
+        "Local-Uncertainty-Final": unc_final,
+        "Local-Uncertainty-Mean": unc_mean,
+        "Local-Uncertainty-Max": unc_max,
+        "Prop-Uncertainty-Final": prop_unc_final,
+        "Prop-Uncertainty-Mean": prop_unc_mean,
+        "Prop-Uncertainty-Max": prop_unc_max,
     }
 
 
@@ -732,8 +662,7 @@ def print_uncertainty_metrics_summary(metrics: Dict):
             print(
                 f"{label}: "
                 f"AUROC={round4_or_none(values['auroc'])} | "
-                f"ECE={round4_or_none(values['ece'])} | "
-                f"Brier={round4_or_none(values['brier'])}"
+                f"PRR={round4_or_none(values['prr'])}"
             )
 
 

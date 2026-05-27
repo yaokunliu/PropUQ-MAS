@@ -2,65 +2,56 @@
 
 set -euo pipefail
 
-ROOT_DIR="/u/yliu105/MAS_UQ"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 export PYTHONUNBUFFERED=1
 
-if [ -f ~/.bashrc ]; then
-  # shellcheck disable=SC1090
-  source ~/.bashrc
+if command -v conda >/dev/null 2>&1; then
+  eval "$(conda shell.bash hook)"
+  conda activate "${CONDA_ENV:-mas}"
 fi
-
-eval "$(conda shell.bash hook)"
-conda activate mas
 
 seed="${SEED:-42}"
 render_svg="${RENDER_SVG:-1}"
 
-# Edit these lists directly to choose which topologies and node counts to prepare.
-topologies=(${TOPOLOGIES:-net}) # chain star_convergent star_divergent net random
-node_counts=(${NODE_COUNTS:-4}) # 2 4 6 8 10
-# node_counts=(${NODE_COUNTS:-5})
-random_edge_counts=(${RANDOM_EDGE_COUNTS:-4 5 6 7 8 9 10})
-mas_prompts=(${MAS_PROMPTS:-norole}) # role
+specs=(
+  "sequential role 4"
+  "hierarchical role 4"
+  "sequential norole 2"
+  "sequential norole 4"
+  "sequential norole 6"
+  "sequential norole 8"
+  "sequential norole 10"
+  "hierarchical norole 2"
+  "hierarchical norole 4"
+  "hierarchical norole 6"
+  "hierarchical norole 8"
+  "hierarchical norole 10"
+  "decentralized norole 4"
+)
 
-# Graph artifacts depend only on topology/node count, not prompt style.
-# We still pass one configurable prompt value for CLI consistency.
-mas_prompt="${mas_prompts[0]:-norole}"
+for spec in "${specs[@]}"; do
+  read -r topology mas_prompt node_num <<< "$spec"
+  current_args=(
+    --method mas
+    --mas_topology "$topology"
+    --mas_node_num "$node_num"
+    --mas_prompt "$mas_prompt"
+    --seed "$seed"
+    --prepare_mas_graph_only
+  )
+  if [ "$render_svg" = "1" ]; then
+    current_args+=(--render_mas_graph_svg)
+  fi
 
-for topology in "${topologies[@]}"; do
-  for node_num in "${node_counts[@]}"; do
-    if [ "$topology" = "random" ]; then
-      for edge_count in "${random_edge_counts[@]}"; do
-        current_args="--method mas --mas_topology $topology --mas_node_num $node_num --mas_prompt $mas_prompt --random_edge_count $edge_count --seed $seed --prepare_mas_graph_only"
-        if [ "$render_svg" = "1" ]; then
-          current_args="$current_args --render_mas_graph_svg"
-        fi
+  echo "STARTING: topology=$topology node_num=$node_num mas_prompt=$mas_prompt seed=$seed"
+  printf 'ARGS:'
+  printf ' %q' "${current_args[@]}"
+  printf '\n'
 
-        echo "STARTING: topology=$topology node_num=$node_num mas_prompt=$mas_prompt random_edge_count=$edge_count seed=$seed host=$(hostname)"
-        echo "ARGS: $current_args"
-        echo "TIME: $(date)"
+  python -u run.py "${current_args[@]}"
 
-        python -u run.py $current_args
-
-        echo "COMPLETED: topology=$topology node_num=$node_num random_edge_count=$edge_count seed=$seed time=$(date)"
-        echo
-      done
-    else
-      current_args="--method mas --mas_topology $topology --mas_node_num $node_num --mas_prompt $mas_prompt --seed $seed --prepare_mas_graph_only"
-      if [ "$render_svg" = "1" ]; then
-        current_args="$current_args --render_mas_graph_svg"
-      fi
-
-      echo "STARTING: topology=$topology node_num=$node_num mas_prompt=$mas_prompt seed=$seed host=$(hostname)"
-      echo "ARGS: $current_args"
-      echo "TIME: $(date)"
-
-      python -u run.py $current_args
-
-      echo "COMPLETED: topology=$topology node_num=$node_num seed=$seed time=$(date)"
-      echo
-    fi
-  done
+  echo "COMPLETED: topology=$topology node_num=$node_num seed=$seed time=$(date)"
+  echo
 done

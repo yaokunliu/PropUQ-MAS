@@ -42,17 +42,17 @@ def _past_length(past_key_values: Optional[Tuple]) -> int:
     return k.shape[-2]
 
 
-LOGIT_UQ_METHODS = ["MSP", "NLL"]
+LOGIT_UQ_METHODS = ["MSP"]
 
 
 def _selected_uq_methods(args) -> List[str]:
     value = (
-        getattr(args, "uncertainty_modes", getattr(args, "uncertainty_mode", None))
+        getattr(args, "local_uncertainty_modes", getattr(args, "local_uncertainty_mode", None))
         if args is not None
         else None
     )
     if value is None:
-        return ["ASK4CONF"]
+        return ["Verb"]
     if isinstance(value, str):
         values = [value]
     else:
@@ -62,19 +62,17 @@ def _selected_uq_methods(args) -> List[str]:
         text = str(item).strip()
         if not text:
             continue
-        if text.lower() == "continuous":
-            text = "ASK4CONF"
         if text not in out:
             out.append(text)
-    return out or ["ASK4CONF"]
+    return out or ["Verb"]
 
 
 def _uses_logit_uq(args) -> bool:
     return any(method in LOGIT_UQ_METHODS for method in _selected_uq_methods(args))
 
 
-def _uses_vllm_native_logprob_uq(args) -> bool:
-    return any(method in {"MSP", "NLL"} for method in _selected_uq_methods(args))
+def _uses_msp_uq(args) -> bool:
+    return "MSP" in _selected_uq_methods(args)
 
 
 def _apply_repetition_penalty_(scores: torch.Tensor, sequences: List[List[int]], penalty: float) -> None:
@@ -114,19 +112,16 @@ def _uq_stats_from_raw_logits(
         return {
             "sequence_probability": None,
             "msp": None,
-            "nll": None,
             "generated_token_count": 0,
         }
     total_logprob = float(sum(chosen_logprobs))
     mean_logprob = total_logprob / len(chosen_logprobs)
     mean_token_probability = float(torch.exp(torch.tensor(mean_logprob, dtype=torch.float64)).item())
     msp = max(0.0, min(1.0, 1.0 - mean_token_probability))
-    nll = -mean_logprob
     return {
         "sequence_probability": None,
         "mean_token_probability": mean_token_probability,
         "msp": msp,
-        "nll": nll,
         "generated_token_count": len(chosen_logprobs),
     }
 
@@ -140,7 +135,6 @@ def _uq_stats_from_cumulative_logprob(
             "sequence_probability": None,
             "mean_token_probability": None,
             "msp": None,
-            "nll": None,
             "generated_token_count": generated_token_count,
         }
     mean_logprob = float(cumulative_logprob) / generated_token_count
@@ -149,7 +143,6 @@ def _uq_stats_from_cumulative_logprob(
         "sequence_probability": None,
         "mean_token_probability": mean_token_probability,
         "msp": max(0.0, min(1.0, 1.0 - mean_token_probability)),
-        "nll": float(-mean_logprob),
         "generated_token_count": generated_token_count,
     }
 
@@ -184,25 +177,6 @@ def _extract_vllm_sampled_token_logprobs(
     for token_id, entry in zip(token_ids, list(sample_logprobs)):
         chosen.append(_extract_vllm_token_logprob(entry, int(token_id)))
     return chosen
-
-
-def _find_subsequence_bounds(
-    haystack: List[int],
-    needle: List[int],
-    *,
-    prefer_last: bool = True,
-) -> Optional[Tuple[int, int]]:
-    if not needle or len(needle) > len(haystack):
-        return None
-    match_indices: List[int] = []
-    last_start = len(haystack) - len(needle)
-    for start in range(last_start + 1):
-        if haystack[start:start + len(needle)] == needle:
-            match_indices.append(start)
-    if not match_indices:
-        return None
-    start = match_indices[-1] if prefer_last else match_indices[0]
-    return start, start + len(needle)
 
 
 class ModelWrapper:
@@ -322,64 +296,6 @@ class ModelWrapper:
             tokens_batch.append(self.tokenizer.convert_ids_to_tokens(active_ids))
         return prompts, input_ids, attention_mask, tokens_batch
 
-    def target_uq_stats_from_generation(
-        self,
-        *,
-        generation_text: str,
-        generated_token_ids: List[int],
-        token_logprobs: List[Optional[float]],
-        target_text: str,
-        prefer_last: bool = True,
-    ) -> Dict[str, Optional[float]]:
-        target_text = str(target_text or "")
-        if not target_text or not generated_token_ids or not token_logprobs:
-            return _uq_stats_from_raw_logits([])
-
-        usable_logprobs = list(token_logprobs[:len(generated_token_ids)])
-        if not usable_logprobs:
-            return _uq_stats_from_raw_logits([])
-
-        target_ids = self.tokenizer(
-            target_text,
-            add_special_tokens=False,
-        )["input_ids"]
-        bounds = _find_subsequence_bounds(
-            list(generated_token_ids),
-            list(target_ids),
-            prefer_last=prefer_last,
-        )
-
-        if bounds is None and generation_text and target_text:
-            retok = self.tokenizer(
-                generation_text,
-                add_special_tokens=False,
-                return_offsets_mapping=True,
-            )
-            full_ids = list(retok["input_ids"])
-            offsets = list(retok["offset_mapping"])
-            if len(full_ids) == len(generated_token_ids):
-                char_start = generation_text.rfind(target_text) if prefer_last else generation_text.find(target_text)
-                if char_start != -1:
-                    char_end = char_start + len(target_text)
-                    covered = [
-                        idx
-                        for idx, (start, end) in enumerate(offsets)
-                        if end > char_start and start < char_end
-                    ]
-                    if covered:
-                        bounds = covered[0], covered[-1] + 1
-
-        if bounds is None:
-            return _uq_stats_from_raw_logits([])
-
-        start, end = bounds
-        chosen_logprobs = [
-            float(logprob)
-            for logprob in usable_logprobs[start:end]
-            if logprob is not None
-        ]
-        return _uq_stats_from_raw_logits(chosen_logprobs)
-
     def vllm_generate_text_batch(
         self,
         prompts: List[str],
@@ -397,7 +313,7 @@ class ModelWrapper:
             top_p=top_p,
             max_tokens=max_new_tokens,
             repetition_penalty=repetition_penalty,
-            logprobs=(1 if _uses_vllm_native_logprob_uq(self.args) else None),
+            logprobs=(1 if _uses_msp_uq(self.args) else None),
             seed=self.seed,
         )
         outputs = self.vllm_engine.generate(prompts, sampling_params)
@@ -420,7 +336,7 @@ class ModelWrapper:
                 "uq_stats": _uq_stats_from_cumulative_logprob(
                     getattr(first, "cumulative_logprob", None),
                     len(token_ids),
-                ) if _uses_vllm_native_logprob_uq(self.args) else None,
+                ) if _uses_msp_uq(self.args) else None,
             }
             details.append(detail)
         if return_generation_details:

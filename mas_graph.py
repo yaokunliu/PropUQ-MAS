@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import random
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,77 +70,27 @@ class MASGraph:
         }
 
 
-def _generate_tree_edges(node_num: int) -> list[MASEdge]:
-    edges: list[MASEdge] = []
-    parent = 0
-    while len(edges) < node_num - 1:
-        left = 2 * parent + 1
-        right = 2 * parent + 2
-        if left < node_num:
-            edges.append(MASEdge(parent, left))
-        if right < node_num and len(edges) < node_num - 1:
-            edges.append(MASEdge(parent, right))
-        parent += 1
-    return edges
-
-
-def _generate_random_edges(node_num: int, *, seed: int = 42, edge_count: int | None = None) -> list[MASEdge]:
-    rng = random.Random(seed)
-    min_edges = max(0, node_num - 1)
-    max_edges = node_num * (node_num - 1) // 2
-
-    if edge_count is None:
-        edge_count = rng.randint(min_edges, max_edges) if max_edges > 0 else 0
-    elif edge_count < min_edges or edge_count > max_edges:
-        raise ValueError(
-            f"random_edge_count must satisfy {min_edges} <= edge_count <= {max_edges} for node_num={node_num}."
-        )
-
-    mandatory_edges = {MASEdge(source, rng.randint(source + 1, node_num - 1)) for source in range(node_num - 1)}
-    if edge_count < len(mandatory_edges):
-        raise ValueError(
-            f"random_edge_count must be at least {len(mandatory_edges)} to ensure every non-final node has an outgoing edge."
-        )
-
-    edge_space = [
-        MASEdge(u, v)
-        for u in range(node_num)
-        for v in range(u + 1, node_num)
-        if MASEdge(u, v) not in mandatory_edges
-    ]
-    rng.shuffle(edge_space)
-    extra_needed = edge_count - len(mandatory_edges)
-    return sorted(list(mandatory_edges) + edge_space[:extra_needed], key=lambda edge: (edge.source, edge.target))
-
-
-def build_mas_graph(topology: str, node_num: int, *, seed: int = 42, random_edge_count: int | None = None) -> MASGraph:
+def build_mas_graph(topology: str, node_num: int) -> MASGraph:
     if node_num < 1:
         raise ValueError("mas_node_num must be at least 1.")
 
     edges: list[MASEdge] = []
-    if topology == "chain":
+    if topology == "sequential":
         edges = [MASEdge(idx, idx + 1) for idx in range(node_num - 1)]
-    elif topology == "star_convergent":
+    elif topology == "hierarchical":
         final_node = node_num - 1
         edges = [MASEdge(idx, final_node) for idx in range(node_num - 1)]
-    elif topology == "star_divergent":
-        edges = [MASEdge(0, idx) for idx in range(1, node_num)]
-    elif topology == "tree":
-        edges = _generate_tree_edges(node_num)
-    elif topology == "net":
+    elif topology == "decentralized":
         edges = [MASEdge(u, v) for u in range(node_num) for v in range(u + 1, node_num)]
-    elif topology == "random":
-        edges = _generate_random_edges(node_num, seed=seed, edge_count=random_edge_count)
     else:
         raise ValueError(f"Unsupported MAS topology: {topology}")
 
     edge_pairs = {(edge.source, edge.target) for edge in edges}
-    if topology not in {"star_divergent", "random"}:
-        final_node = node_num - 1
-        for node_idx in range(node_num - 1):
-            has_outgoing = any(source == node_idx for source, _ in edge_pairs)
-            if not has_outgoing and node_idx != final_node:
-                edge_pairs.add((node_idx, final_node))
+    final_node = node_num - 1
+    for node_idx in range(node_num - 1):
+        has_outgoing = any(source == node_idx for source, _ in edge_pairs)
+        if not has_outgoing and node_idx != final_node:
+            edge_pairs.add((node_idx, final_node))
     normalized_edges = [MASEdge(source, target) for source, target in sorted(edge_pairs)]
     return MASGraph(topology=topology, node_num=node_num, edges=normalized_edges)
 

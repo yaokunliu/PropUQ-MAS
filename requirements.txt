@@ -1,8 +1,8 @@
-transformers
 torch
-numpy
-tqdm
+transformers
 accelerate
 datasets
-# Requires the Graphviz system executable (`dot`) separately for SVG export.
+numpy
+tqdm
 graphviz
+vllm

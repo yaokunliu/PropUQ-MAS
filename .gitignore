@@ -1,9 +1,9 @@
-# Python bytecode and caches
+# Python caches
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Build / packaging artifacts
+# Build and packaging artifacts
 build/
 dist/
 *.egg-info/
@@ -14,43 +14,59 @@ dist/
 venv/
 env/
 
-# Testing / coverage
+# Test, coverage, and type-check caches
 .pytest_cache/
 .coverage
 .coverage.*
 htmlcov/
-
-# Type checker / linter caches
 .mypy_cache/
 .ruff_cache/
 
 # Jupyter
 .ipynb_checkpoints/
 
-# IDE / editor files
+# Editor and OS files
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# OS files
 .DS_Store
 
-# Logs
-*.log
-log/
-logs_bak/
-test/
-data/
-results/
+# Secrets and local environment files
+.env
+.env.*
+*.env
+.hf_token_env
+hf_token_env
+
+# Runtime outputs
 outputs/
 outputs_bak/
+log/
+logs/
+logs_bak/
+test/
+results/
+
+# Dataset files. Keep dataset preparation instructions in README instead.
+data/
 
 # Slurm outputs
 slurm-*.out
 slurm-*.err
+*.out
+*.err
 *.sbatch.out
 *.sbatch.err
 
-run.sbatch
+# Local notes and manuscripts
 note.txt
+*.pdf
+
+# Local one-off launchers
+run.sbatch
+
+# Hugging Face and model caches
+.cache/
+hf_cache/
+model_cache/
