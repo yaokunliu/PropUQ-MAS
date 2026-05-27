@@ -60,11 +60,6 @@ slurm-*.err
 *.sbatch.out
 *.sbatch.err
 
-# Local notes and manuscripts
-.codex
-note.txt
-*.pdf
-
 # Local one-off launchers
 run.sbatch
 run/test.sbatch
