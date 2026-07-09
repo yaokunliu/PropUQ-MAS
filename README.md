@@ -7,8 +7,8 @@ PropUQ-MAS represents a multi-agent execution as a directed communication graph 
 ## Supported Scope
 
 - Datasets: `gsm8k`, `medqa`, `mbppplus`
-- Models: `Qwen/Qwen3-4B`, `Qwen/Qwen3-8B`, `Qwen/Qwen3-14B`, `google/gemma-3-12b-it`
-- MAS topologies: `sequential`, `hierarchical`, `decentralized`
+- Model: `Qwen/Qwen3-8B`
+- MAS topologies: `sequential`, `hierarchical`
 - Local uncertainty modes: `Verb`, `MSP`
 - Metrics: AUROC and PRR
 
@@ -131,6 +131,58 @@ outputs/mas_graphs/<graph_config>/mas_graph.svg
 ```
 
 The metrics JSON reports AUROC and PRR for local uncertainty and propagation-aware uncertainty.
+
+## Baselines
+
+Baseline reproductions and comparison results are stored under `baseline/`.
+
+The main MedQA comparison table is:
+
+```text
+baseline/comparison.md
+```
+
+It compares MATU, UProp, local MSP/Verb uncertainty, and PropUQ on `Qwen/Qwen3-8B` for `sequential, role` and `hierarchical, role`.
+
+The MATU baseline is available at:
+
+```text
+baseline/matu/
+```
+
+It includes the reproduction code, local bash scripts, copied MedQA results, and a runtime summary. The strict MATU reproduction writes one uncertainty value per `(topology, mas_prompt, sample_idx)`.
+
+Main MedQA files:
+
+```text
+baseline/matu/results/medqa/matu_medqa_scores.csv
+baseline/matu/results/medqa/matu_medqa_main_results.csv
+baseline/matu/results/medqa/matu_medqa_results.md
+baseline/matu/results/medqa/matu_medqa_runtime.md
+baseline/matu/results/medqa/matu_medqa_runtime.json
+baseline/matu/results/runtime/medqa_runtime_summary.md
+```
+
+Current MedQA MATU results:
+
+| MAS config | n | Accuracy | AUROC | PRR | Time/sample |
+|---|---:|---:|---:|---:|---:|
+| sequential,role | 300 | 0.7933 | 0.7177 | 0.3731 | 41.410s |
+| hierarchical,role | 300 | 0.7800 | 0.6264 | 0.2633 | 56.040s |
+
+The UProp baseline is available at:
+
+```text
+baseline/uprop/
+```
+
+It implements a MedQA-only UProp reproduction on `Qwen/Qwen3-8B + sequential,role` with exactly 10 repeated seeds and PE from generated token log-probabilities.
+
+Current MedQA UProp results:
+
+| MAS config | n | Accuracy | AUROC | PRR | Time/sample |
+|---|---:|---:|---:|---:|---:|
+| sequential,role | 300 | 0.2867 | 0.6501 | 0.3303 | 11.310s |
 
 ## Citation
 

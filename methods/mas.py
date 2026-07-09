@@ -460,6 +460,8 @@ class MASMethod:
                     "local_uncertainty": local_uncertainty,
                     "local_uncertainty_by_method": local_uncertainty_by_method,
                     "logits_uq_stats": generation_detail.get("uq_stats"),
+                    "token_logprobs": generation_detail.get("token_logprobs"),
+                    "generated_token_ids": generation_detail.get("generated_token_ids"),
                     "alpha": alpha,
                 }
 

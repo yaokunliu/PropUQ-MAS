@@ -1,0 +1,2 @@
+group,n,accuracy,auroc,prr,mean_uprop_uncertainty,mean_intrinsic_uncertainty,mean_extrinsic_uncertainty,mean_step_pe
+"sequential,role",300,0.2866666666666667,0.650130406433384,0.33030795589240675,136.9546785516671,548.7206460534568,5.452691145483905,137.1801615133642

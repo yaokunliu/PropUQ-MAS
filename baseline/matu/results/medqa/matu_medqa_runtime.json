@@ -1,0 +1,63 @@
+{
+  "task": "medqa",
+  "started_at_utc": "2026-07-09T09:54:52",
+  "finished_at_utc": "2026-07-09T10:07:10",
+  "uncertainty_example_unit": "(topology, mas_prompt, sample_idx)",
+  "num_uncertainty_examples": 600,
+  "num_unique_samples": 300,
+  "num_mas_configs": 2,
+  "num_repeated_trajectories": 10,
+  "seeds": [
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51
+  ],
+  "time_per_uncertainty_example_sec": 48.725,
+  "time_per_uncertainty_example_note": "End-to-end MATU time per uncertainty example: trajectory generation for all repeated trajectories plus uncertainty scoring.",
+  "end_to_end_elapsed_sec": 29235.0,
+  "end_to_end_elapsed_min": 487.25,
+  "trajectory_generation_elapsed_sec": 28743.0,
+  "trajectory_generation_elapsed_min": 479.05,
+  "trajectory_generation_time_per_uncertainty_example_sec": 47.905,
+  "uncertainty_scoring_elapsed_sec": 492.0,
+  "uncertainty_scoring_elapsed_min": 8.2,
+  "uncertainty_scoring_time_per_uncertainty_example_sec": 0.82,
+  "scoring_script_total_elapsed_sec": 492.0,
+  "scoring_script_total_elapsed_min": 8.2,
+  "time_by_mas_config": [
+    {
+      "mas_config": "sequential,role",
+      "num_uncertainty_examples": 300,
+      "trajectory_generation_time_per_uncertainty_example_sec": 40.59,
+      "trajectory_generation_elapsed_sec": 12177.0,
+      "uncertainty_scoring_time_per_uncertainty_example_sec": 0.82,
+      "time_per_uncertainty_example_sec": 41.41
+    },
+    {
+      "mas_config": "hierarchical,role",
+      "num_uncertainty_examples": 300,
+      "trajectory_generation_time_per_uncertainty_example_sec": 55.22,
+      "trajectory_generation_elapsed_sec": 16566.0,
+      "uncertainty_scoring_time_per_uncertainty_example_sec": 0.82,
+      "time_per_uncertainty_example_sec": 56.04
+    }
+  ],
+  "runtime_note": "Trajectory generation times are estimated from the measured MedQA generation runtime summary; uncertainty scoring time is estimated from the retained two-config scoring runtime because the original run did not separately instrument the uncertainty block.",
+  "target_model": "Qwen/Qwen3-8B",
+  "embedding_backend": "qwen3",
+  "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
+  "embedding_device": "cuda",
+  "embedding_batch_size": 32,
+  "embedding_max_length": 4096,
+  "max_rank": 3,
+  "label_mode": "first",
+  "raw_dir": "external_outputs/ASK4CONF",
+  "output_dir": "baseline/matu/results/medqa"
+}
