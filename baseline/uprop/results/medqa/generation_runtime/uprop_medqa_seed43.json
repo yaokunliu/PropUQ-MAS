@@ -8,5 +8,5 @@
   "correct": 93,
   "total_time_sec": 342.2055,
   "time_per_sample_sec": 1.1407,
-  "runtime_log": "/u/yliu105/PropUQ-MAS/baseline/uprop/results/medqa/generation_runtime/uprop_medqa_seed43.log"
+  "runtime_log": "baseline/uprop/results/medqa/generation_runtime/uprop_medqa_seed43.log"
 }
