@@ -120,14 +120,14 @@ bash run/prepare_mas_graphs.sh
 
 Set `RENDER_SVG=0` if Graphviz is unavailable.
 
-## Baselines
+## Sampling-Based Baselines
 
 The repository includes MedQA reproductions for:
 
-- [MATU](baseline/matu/README.md)
-- [UProp](baseline/uprop/README.md)
+- [MATU](sampling_baselines/matu/README.md)
+- [UProp](sampling_baselines/uprop/README.md)
 
-See [`baseline/comparison.md`](baseline/comparison.md) for consolidated results and runtime information.
+See [`sampling_baselines/comparison.md`](sampling_baselines/comparison.md) for consolidated results and runtime information.
 
 ## Reproducibility Notes
 

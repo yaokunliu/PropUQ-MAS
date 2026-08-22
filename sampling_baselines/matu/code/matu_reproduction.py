@@ -127,7 +127,7 @@ def discover_specs(raw_dir: Path, seeds: tuple[int, ...], model: str, task: str)
         suffix = "" if len(missing) <= 12 else f"\n... and {len(missing) - 12} more"
         raise FileNotFoundError(
             "Missing repeated-trajectory raw prediction files. "
-            "Generate them first with baseline/matu/scripts/matu_reproduction_generate_repeats.sh.\n"
+            "Generate them first with sampling_baselines/matu/scripts/matu_reproduction_generate_repeats.sh.\n"
             f"{example}{suffix}"
         )
     return specs

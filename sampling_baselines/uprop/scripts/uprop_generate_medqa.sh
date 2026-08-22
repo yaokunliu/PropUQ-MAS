@@ -22,7 +22,7 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 USE_VLLM="${USE_VLLM:-1}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9}"
-RUNTIME_DIR="${RUNTIME_DIR:-${REPO_ROOT}/baseline/uprop/results/medqa/generation_runtime}"
+RUNTIME_DIR="${RUNTIME_DIR:-${REPO_ROOT}/sampling_baselines/uprop/results/medqa/generation_runtime}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 mkdir -p "${RUNTIME_DIR}"
 

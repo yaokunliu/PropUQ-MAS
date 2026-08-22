@@ -1,4 +1,4 @@
-# UProp Baseline
+# UProp Sampling-Based Baseline
 
 This folder contains a MedQA-only UProp reproduction for comparison with PropUQ-MAS.
 
@@ -17,7 +17,7 @@ The implementation follows the paper's trajectory-dependent uncertainty propagat
 ## Layout
 
 ```text
-baseline/uprop/
+sampling_baselines/uprop/
   code/uprop_reproduction.py
   scripts/uprop_generate_medqa.sh
   scripts/uprop_score_medqa.sh
@@ -29,23 +29,23 @@ baseline/uprop/
 Generate UProp trajectories first. This writes MSP raw files with per-token log-probabilities under `outputs/MSP`.
 
 ```bash
-bash baseline/uprop/scripts/uprop_generate_medqa.sh
+bash sampling_baselines/uprop/scripts/uprop_generate_medqa.sh
 ```
 
 Then score UProp:
 
 ```bash
-bash baseline/uprop/scripts/uprop_score_medqa.sh
+bash sampling_baselines/uprop/scripts/uprop_score_medqa.sh
 ```
 
 ## Outputs
 
 ```text
-baseline/uprop/results/medqa/uprop_medqa_scores.csv
-baseline/uprop/results/medqa/uprop_medqa_results.csv
-baseline/uprop/results/medqa/uprop_medqa_results.md
-baseline/uprop/results/medqa/uprop_medqa_runtime.json
-baseline/uprop/results/medqa/generation_runtime/
+sampling_baselines/uprop/results/medqa/uprop_medqa_scores.csv
+sampling_baselines/uprop/results/medqa/uprop_medqa_results.csv
+sampling_baselines/uprop/results/medqa/uprop_medqa_results.md
+sampling_baselines/uprop/results/medqa/uprop_medqa_runtime.json
+sampling_baselines/uprop/results/medqa/generation_runtime/
 ```
 
 `uprop_medqa_scores.csv` contains one sample-level UProp uncertainty per MedQA sample.
