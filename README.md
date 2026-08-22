@@ -8,8 +8,6 @@
 
 Official implementation of **PropUQ-MAS: Propagation-Aware Uncertainty Quantification for LLM Multi-Agent Systems**.
 
-PropUQ-MAS is a training-free framework for node-wise uncertainty quantification in LLM multi-agent systems (MAS). It models an MAS execution as a communication graph and combines local uncertainty with uncertainty inherited from upstream messages, enabling reliability monitoring for both intermediate outputs and final answers in a single MAS execution.
-
 ## Highlights
 
 - Propagation-aware and interaction-aware uncertainty for LLM multi-agent systems.
@@ -149,7 +147,6 @@ The available manuscript is anonymized. Replace the provisional author field bel
   author    = {{PropUQ-MAS Authors}},
   booktitle = {Proceedings of the 2026 Conference on Empirical Methods in Natural Language Processing},
   year      = {2026},
-  url       = {https://github.com/yaokunliu/PropUQ-MAS}
 }
 ```
 
